@@ -4,7 +4,7 @@
 //! framework's set of variables. Core edits the files and validates them; this
 //! module parses arguments and renders. Changing `[env]` changes what an
 //! approval covers: the commands say so and never approve it.
-use super::hooks::{Guard, TrustNote, apply, files_json, read_files, say_notes, target_of};
+use super::hooks::{Files, Guard, TrustNote, apply, files_json, read_files, say_notes, target_of};
 use super::output::{self, Palette, note, say, table};
 use super::{Ctx, ProjectInfo};
 use anyhow::Result;
@@ -185,37 +185,28 @@ fn shown(row: &PreviewRow, reveal: bool) -> &str {
 }
 
 fn list(ctx: &Ctx, name: &str, args: ListArgs) -> Result<ExitCode> {
-    let files = read_files(ctx)?;
+    // The recipes listed, the values they resolve to and the approval judged
+    // are the targeted workspace's: asked for, else the one the command runs
+    // in, else the default workspace.
+    let Files { files, dir } = read_files(ctx, args.workspace.as_deref())?;
     let view = files.env()?;
     let project = Project::open(&files.root)?;
-
-    // The workspace the values resolve in: asked for, else the one the
-    // command runs in, else the default workspace.
-    let workspace = match &args.workspace {
-        Some(wanted) => Some(worktree::find(&project, wanted)?.ok_or_else(|| {
-            anyhow::anyhow!("workspace '{wanted}' does not exist; `devflow list` shows them")
-        })?),
-        None => worktree::containing(&project, &ctx.cwd)
-            .ok()
-            .flatten()
-            .or_else(|| {
-                worktree::list(&project)
-                    .ok()?
-                    .into_iter()
-                    .find(|w| w.is_default)
-            }),
-    };
+    let workspace = worktree::list(&project)?
+        .into_iter()
+        .find(|w| w.path == dir);
     let preview = match &workspace {
         Some(workspace) => config_edit::preview_env(&project, workspace)?,
         None => None,
     };
-    let state = trust::state(&project)?;
-    let references = config_edit::available_references(&project.config);
+    let state = trust::state_at(&project, &dir)?;
+    let at = project.at(&dir);
+    let references = config_edit::available_references(&at.config);
     let reveal = args.show_values;
 
     if ctx.json {
         let body = json!({
             "project": ProjectInfo::of(&project),
+            "path": dir,
             "files": files_json(&files),
             // Whether `recipes[].template` and `preview` hold the real values.
             "revealed": reveal,
@@ -233,7 +224,7 @@ fn list(ctx: &Ctx, name: &str, args: ListArgs) -> Result<ExitCode> {
             "preview_workspace": workspace.as_ref().map(|w| &w.name),
             "trust": state,
             // Valid configuration that is probably not what was meant.
-            "warnings": project
+            "warnings": at
                 .config
                 .env
                 .hints()
@@ -252,7 +243,12 @@ fn list(ctx: &Ctx, name: &str, args: ListArgs) -> Result<ExitCode> {
     }
 
     let palette = Palette::stdout();
-    for hint in project.config.env.hints() {
+    say(palette.dim(&format!(
+        "[env] of {}, from {}",
+        output::tilde(&dir),
+        files.source.describe()
+    )));
+    for hint in at.config.env.hints() {
         note(format!("warning: {}", hint.message));
         let add = Remedy::AddEnvPreset {
             root: project.root.clone(),
@@ -357,23 +353,24 @@ fn change(
     edit: &Edit,
     verb: &str,
 ) -> Result<ExitCode> {
-    let files: ConfigFiles = read_files(ctx)?;
+    let target_files = read_files(ctx, guard.workspace.as_deref())?;
+    let files: &ConfigFiles = &target_files.files;
     let target = target_of(local);
-    let applied: Applied = apply(&files, target, edit, guard)?;
-    let trust = TrustNote::after(&files.root, &applied)?;
-    let after = ConfigFiles::read(&files.root)?;
+    let applied: Applied = apply(files, target, edit, guard)?;
+    let trust = TrustNote::after(&files.root, &target_files.dir, &applied)?;
+    let after = files.reread()?;
     let view = after.env()?;
     let project = Project::open(&files.root)?;
-    let file = applied
-        .path
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_default();
+    // The file that was edited, named in full: a workspace's own file and the
+    // main checkout's are different files.
+    let file = output::tilde(&applied.path);
     if ctx.json {
         let body = json!({
             "project": ProjectInfo::of(&project),
-            "file": file,
+            "file": applied.path.file_name().map(|n| n.to_string_lossy().into_owned()),
             "path": applied.path,
+            "workspace": target_files.dir,
+            "recipes_source": files.source,
             "target": applied.target,
             "changed": applied.changed,
             // The keys only: an edit's response never repeats a value (the one

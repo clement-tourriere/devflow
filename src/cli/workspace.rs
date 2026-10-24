@@ -51,6 +51,9 @@ pub struct SwitchArgs {
     /// Run setup hooks without checking that mise hands them this workspace's variables (recorded in the receipt)
     #[arg(long)]
     pub skip_mise_check: bool,
+    /// Use the default workspace's hooks, [env] and copy list in a workspace whose own devflow.toml is missing or unusable (recorded in its receipt; it holds only until the workspace has a valid file)
+    #[arg(long)]
+    pub use_default_recipes: bool,
 }
 
 #[derive(Args)]
@@ -89,6 +92,9 @@ pub struct SetupArgs {
     /// Run setup hooks without checking that mise hands them this workspace's variables (recorded in the receipt)
     #[arg(long)]
     pub skip_mise_check: bool,
+    /// Use the default workspace's hooks, [env] and copy list in a workspace whose own devflow.toml is missing or unusable (recorded in its receipt; it holds only until the workspace has a valid file)
+    #[arg(long, conflicts_with = "from_git_hook")]
+    pub use_default_recipes: bool,
     /// Entry point of the post-checkout Git hook: never prompts and never fails
     #[arg(long, hide = true)]
     pub from_git_hook: bool,
@@ -322,6 +328,7 @@ pub fn switch(ctx: &Ctx, args: SwitchArgs) -> Result<ExitCode> {
         no_db: args.no_db,
         no_hooks: args.no_hooks,
         skip_mise_check: args.skip_mise_check,
+        use_default_recipes: args.use_default_recipes,
         non_interactive: !ctx.interactive(),
         ..SetupOptions::default()
     };
@@ -330,8 +337,8 @@ pub fn switch(ctx: &Ctx, args: SwitchArgs) -> Result<ExitCode> {
     let (outcome, created) = if args.create {
         // A workspace that does not exist yet is judged by the one it is made from.
         let source = trust::target_of(&project, args.from.as_deref())?;
-        let relevant = trust::governs_setup(&project, !args.no_hooks)
-            || (!args.no_hooks && !project.config.hooks.switch.is_empty());
+        let relevant = trust::governs_setup(&project, &source, !args.no_hooks)
+            || (!args.no_hooks && !project.at(&source).config.hooks.switch.is_empty());
         options.approval = trust::resolve(ctx, &project, &source, relevant)?;
         let mut request = CreateRequest {
             name,
@@ -370,8 +377,11 @@ pub fn switch(ctx: &Ctx, args: SwitchArgs) -> Result<ExitCode> {
                 name
             )
         })?;
-        let relevant = switch_needs_trust(&project, &workspace, args.no_hooks);
-        options.approval = trust::resolve(ctx, &project, &workspace.path, relevant)?;
+        // With the default workspace's recipes chosen for it, the review is of
+        // the scope it will then run.
+        let judged = project.at_choosing(&workspace.path, args.use_default_recipes);
+        let relevant = switch_needs_trust(&judged, &workspace, args.no_hooks);
+        options.approval = trust::resolve(ctx, &judged, &workspace.path, relevant)?;
         match setup::activate(&project, &workspace, options, &mut printer) {
             Ok(outcome) => (outcome, false),
             Err(error) => {
@@ -414,7 +424,7 @@ fn landing(ctx: &Ctx, project: &Project, target: &Workspace, exact: Option<&Path
 /// `Busy` is not a failure: another devflow process is setting the workspace
 /// up. Report it as `in_progress` (exit 2, the same as an outcome in that
 /// state) instead of an error; any other error is passed on.
-fn in_progress(
+pub(super) fn in_progress(
     ctx: &Ctx,
     command: &str,
     project: &Project,
@@ -465,7 +475,9 @@ fn still_running(palette: Palette, workspace: &str) -> String {
 /// Whether switching into `workspace` can run something an approval governs,
 /// so a trust prompt is worth showing: switch hooks exist, or setup is not
 /// finished and would run setup hooks or apply `[env]` recipes.
-fn switch_needs_trust(project: &Project, workspace: &Workspace, no_hooks: bool) -> bool {
+pub(super) fn switch_needs_trust(project: &Project, workspace: &Workspace, no_hooks: bool) -> bool {
+    // The recipes the workspace runs are its own.
+    let project = &*project.at(&workspace.path);
     let setup_runs = match setup::receipt(project, workspace) {
         Ok(Some(receipt)) => receipt.status() != Status::Ready,
         _ => true,
@@ -739,8 +751,7 @@ fn wide_cells(wide: &Wide, now: chrono::DateTime<chrono::Utc>) -> Vec<String> {
         }),
         wide.merged
             .map_or_else(dash, |merged| merged.describe().to_string()),
-        wide.last_active_at
-            .map_or_else(dash, |at| output::ago(at, now)),
+        active_cell(wide, now),
         if wide.services_error.is_some() {
             "?".to_string()
         } else {
@@ -770,6 +781,24 @@ fn wide_cells(wide: &Wide, now: chrono::DateTime<chrono::Utc>) -> Vec<String> {
             }
         },
     ]
+}
+
+/// When the workspace was last used, with `suspended` and `pinned` marked.
+fn active_cell(wide: &Wide, now: chrono::DateTime<chrono::Utc>) -> String {
+    let mut cell = wide
+        .last_active_at
+        .map_or_else(|| "—".to_string(), |at| output::ago(at, now));
+    let flags: Vec<&str> = [
+        wide.suspended_at.map(|_| "suspended"),
+        wide.pinned.then_some("pinned"),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    if !flags.is_empty() {
+        cell.push_str(&format!(" [{}]", flags.join(", ")));
+    }
+    cell
 }
 
 fn service_state(service: &container_services::View) -> &'static str {
@@ -802,7 +831,19 @@ fn status_label(item: &WorkspaceStatus) -> String {
                     "ready"
                 }
             }
-            Some(Status::NeedsAttention) => "needs attention",
+            Some(Status::NeedsAttention) => {
+                // No recipes of its own and none chosen: said in the status
+                // column, since what to do about it is not "run setup again".
+                let no_recipes = item
+                    .recipes
+                    .as_ref()
+                    .is_some_and(|r| r.source.is_unavailable());
+                if no_recipes {
+                    "needs attention (no recipes)"
+                } else {
+                    "needs attention"
+                }
+            }
             Some(Status::InProgress) => "in progress",
         }
     }
@@ -840,16 +881,20 @@ pub fn setup(ctx: &Ctx, args: SetupArgs) -> Result<ExitCode> {
     let workspace = current_workspace(ctx, &project)?;
     let provisions = project.config.containers().next().is_some()
         || (project.config.postgres().is_some() && args.database_url.is_none());
+    // With the default workspace's recipes chosen for it, the review is of the
+    // scope it will then run.
+    let judged = project.at_choosing(&workspace.path, args.use_default_recipes);
     let options = SetupOptions {
         data_from: args.data_from,
         database_url: args.database_url,
         approval: trust::resolve(
             ctx,
-            &project,
+            &judged,
             &workspace.path,
-            trust::governs_setup(&project, true),
+            trust::governs_setup(&judged, &workspace.path, true),
         )?,
         skip_mise_check: args.skip_mise_check,
+        use_default_recipes: args.use_default_recipes,
         non_interactive: !ctx.interactive(),
         ..SetupOptions::default()
     };
@@ -1006,7 +1051,7 @@ fn current_workspace(ctx: &Ctx, project: &Project) -> Result<Workspace> {
 
 /// Print a setup outcome (JSON document or human summary) and map its status
 /// to the exit code: 0 ready, 2 when the workspace needs attention.
-fn report(
+pub(super) fn report(
     ctx: &Ctx,
     command: &str,
     project: &Project,
@@ -1080,6 +1125,15 @@ fn summary_lines(outcome: &SetupOutcome, palette: Palette) -> Vec<String> {
             drift.describe()
         ));
     }
+    if let Some(since) = outcome.resumed_from {
+        lines.push(format!(
+            "{} {:<11} {} was suspended {}",
+            palette.green("✓"),
+            "resumed",
+            workspace.name,
+            output::ago(since, chrono::Utc::now())
+        ));
+    }
     // The services that had to be started, and the ones that could not.
     for service in &outcome.services_state {
         match service.state {
@@ -1139,6 +1193,37 @@ fn summary_lines(outcome: &SetupOutcome, palette: Palette) -> Vec<String> {
                 let detail = record.detail.as_deref().unwrap_or("no details recorded");
                 lines.push(format!("  {}: {}", phase.as_str(), redact::text(detail)));
             }
+            let no_recipes = outcome.recipes.source.is_unavailable();
+            if no_recipes {
+                // The choice is a remedy like the others; the other way out is
+                // a valid devflow.toml in the workspace, then setup again.
+                lines.extend(
+                    outcome
+                        .remedies
+                        .iter()
+                        .filter(|r| {
+                            matches!(
+                                r,
+                                Remedy::UseDefaultRecipes { .. } | Remedy::OpenFile { .. }
+                            )
+                        })
+                        .filter_map(Remedy::hint)
+                        .map(|hint| format!("  hint: {}", redact::text(&hint))),
+                );
+                // A start point that predates an uncommitted file cannot have
+                // it whatever setup does: the problem above says so.
+                let uncommitted = matches!(
+                    &outcome.recipes.source,
+                    devflow_core::effective::RecipesSource::Unavailable { because }
+                        if because.kind == devflow_core::effective::ProblemKind::NotCommitted
+                );
+                if !uncommitted {
+                    lines.push(
+                        "  hint: or commit a valid devflow.toml in this workspace and run setup again; its own recipes then apply."
+                            .to_string(),
+                    );
+                }
+            }
             if needs_trust {
                 lines.push(
                     "  Review what this project runs with `devflow trust` (or set DEVFLOW_TRUST_HOOKS=1), then run `devflow setup` here to finish."
@@ -1152,7 +1237,7 @@ fn summary_lines(outcome: &SetupOutcome, palette: Palette) -> Vec<String> {
                     workspace.path.display()
                 ));
             }
-            if !failed && !needs_trust {
+            if !failed && !needs_trust && !no_recipes {
                 // Phases reopened by a configuration change.
                 lines.push(format!(
                     "  Run `devflow setup` in {} to apply the change.",
@@ -1166,18 +1251,26 @@ fn summary_lines(outcome: &SetupOutcome, palette: Palette) -> Vec<String> {
 
 // --- remove -------------------------------------------------------------
 
+/// Whether removing the workspace at `target` runs teardown hooks that need an
+/// approval: its own branch's (see `devflow_core::effective`), not the main
+/// checkout's.
+fn teardown_governed(project: &Project, target: &Path) -> bool {
+    !project.at(target).config.hooks.teardown.is_empty()
+}
+
 pub fn remove(ctx: &Ctx, args: RemoveArgs) -> Result<ExitCode> {
     let project = ctx.project()?;
+    // The teardown hooks are the target workspace's own (its branch's), and so is
+    // the review: asked about the main checkout's, a branch with a teardown hook
+    // the main checkout lacks would never be asked, core would refuse, and the
+    // forced fallback would skip the cleanup nobody approved.
+    let target = trust::target_of(&project, Some(&args.name))?;
+    let teardown = teardown_governed(&project, &target);
     let mut options = RemoveOptions {
         force: args.force,
         keep_data: args.keep_data,
         delete_branch: args.delete_branch,
-        approval: trust::resolve(
-            ctx,
-            &project,
-            &trust::target_of(&project, Some(&args.name))?,
-            !project.config.hooks.teardown.is_empty(),
-        )?,
+        approval: trust::resolve(ctx, &project, &target, teardown)?,
         cwd: Some(ctx.cwd.clone()),
         pitchfork: None,
         // The user named the workspace on the command line just now.
@@ -1267,6 +1360,9 @@ pub fn remove(ctx: &Ctx, args: RemoveArgs) -> Result<ExitCode> {
             outcome.stopped_daemons.len(),
             outcome.stopped_daemons.join(", ")
         ));
+    }
+    if let Some(released) = &outcome.released_focus {
+        say(format!("  {}", released.describe()));
     }
     if let Some(id) = outcome.dropped_branch {
         say(format!("  dropped database branch {id}"));
@@ -1538,6 +1634,7 @@ mod tests {
             receipt,
             payload: Vec::new(),
             branch_start: None,
+            checkout: None,
             hooks: None,
             warnings: vec!["could not clone x".into()],
             remedies,
@@ -1548,7 +1645,67 @@ mod tests {
             services_state: Vec::new(),
             switch_hooks: None,
             autostart: None,
+            recipes: devflow_core::effective::RecipesReport {
+                source: devflow_core::effective::RecipesSource::Workspace {
+                    file: PathBuf::from("/work/feature-a/devflow.toml"),
+                },
+                digest: String::new(),
+                shared: PathBuf::from("/work/main/devflow.toml"),
+                local: None,
+                ignored_local: None,
+                differing: Vec::new(),
+                choice: None,
+            },
+            resumed_from: None,
         }
+    }
+
+    #[test]
+    fn removal_asks_about_the_teardown_hooks_of_the_workspace_it_removes() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap().join("shop");
+        std::fs::create_dir_all(&root).unwrap();
+        let repo = git2::Repository::init(&root).unwrap();
+        let id = uuid::Uuid::new_v4();
+        let file = |hooks: &str| {
+            format!("[project]\nname = \"shop\"\nid = \"{id}\"\n\n[hooks]\n{hooks}\n")
+        };
+        std::fs::write(root.join("devflow.toml"), file("teardown = []")).unwrap();
+        let sig = git2::Signature::now("T", "t@example.com").unwrap();
+        let mut index = repo.index().unwrap();
+        index.add_path(Path::new("devflow.toml")).unwrap();
+        index.write().unwrap();
+        let tree = repo.find_tree(index.write_tree().unwrap()).unwrap();
+        repo.commit(Some("HEAD"), &sig, &sig, "i", &tree, &[])
+            .unwrap();
+        let (with_hook, without) = (dir.path().join("with"), dir.path().join("without"));
+        repo.worktree("with", &with_hook, None).unwrap();
+        repo.worktree("without", &without, None).unwrap();
+        let (with_hook, without) = (
+            with_hook.canonicalize().unwrap(),
+            without.canonicalize().unwrap(),
+        );
+        // The branch has a teardown hook the main checkout lacks, and the other
+        // way round.
+        std::fs::write(
+            with_hook.join("devflow.toml"),
+            file("teardown = [\"make clean\"]"),
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("devflow.toml"),
+            file("teardown = [\"make down\"]"),
+        )
+        .unwrap();
+        std::fs::write(without.join("devflow.toml"), file("teardown = []")).unwrap();
+
+        let project = Project::open(&root).unwrap();
+        assert!(teardown_governed(&project, &with_hook));
+        assert!(
+            !teardown_governed(&project, &without),
+            "the main checkout's hook is not this workspace's"
+        );
+        assert!(teardown_governed(&project, &root));
     }
 
     fn receipt() -> Receipt {

@@ -20,7 +20,8 @@ use crate::{
     redaction::RefusalView,
     services::{
         BranchRow, BranchState, Cow, DockerEngine, LastCloneRow, OrphanBranch, Orphans,
-        ServiceBackend, ServiceCount, ServiceDetail, ServicesModel, SnapshotRow,
+        ServiceBackend, ServiceCount, ServiceDetail, ServicesModel, SnapshotRow, SqliteResetDone,
+        SqliteSnapshotMade,
     },
     state::PitchforkInstall,
 };
@@ -429,7 +430,7 @@ fn the_processes_section_says_what_is_missing_instead_of_staying_blank(cx: &mut 
                 path: None,
                 installed: false,
                 version: None,
-                missing_features: Vec::new(),
+                unsupported: None,
                 problem: None,
             }),
             ..Default::default()
@@ -1174,6 +1175,8 @@ struct FakeServices {
     effects: std::sync::Mutex<Effects>,
     /// Core's answer to a drop: the workspaces' receipts cannot all be read.
     ownership_unknown: std::sync::atomic::AtomicBool,
+    /// Core's answer to a sqlite snapshot: the file is locked for writing.
+    sqlite_locked: std::sync::atomic::AtomicBool,
 }
 
 impl FakeServices {
@@ -1185,6 +1188,7 @@ impl FakeServices {
             receipts: Default::default(),
             effects: Default::default(),
             ownership_unknown: Default::default(),
+            sqlite_locked: Default::default(),
         })
     }
 
@@ -1425,6 +1429,76 @@ impl ServiceBackend for FakeServices {
         self.record(format!("forget {key}"));
         Ok(vec!["branch x".into()])
     }
+
+    fn sqlite_snapshot(
+        &self,
+        _: &Project,
+        workspace: &Workspace,
+        key: &str,
+        name: &str,
+        expect: Option<BranchExpect>,
+    ) -> anyhow::Result<SqliteSnapshotMade> {
+        if let Some(expect) = expect {
+            self.verify(workspace, key, expect)?;
+        }
+        if self.sqlite_locked.load(std::sync::atomic::Ordering::SeqCst) {
+            use devflow_core::remedy::{Problem, Remedy};
+            return Err(Problem::new(format!(
+                "the database db/app.sqlite3 of service '{key}' is locked for writing by another process; waited 5.0 s and copied nothing"
+            ))
+            .with(Remedy::Retry)
+            .with(Remedy::OpenFile {
+                path: PathBuf::from("/tmp/shop/devflow.toml"),
+            })
+            .into_error());
+        }
+        self.record(format!("sqlite-snapshot {key} {} {name}", workspace.name));
+        Ok(SqliteSnapshotMade {
+            label: format!("{name}@v1"),
+            how: Some("reflink".into()),
+            bytes: Some(8192),
+        })
+    }
+
+    fn sqlite_delete_snapshot(
+        &self,
+        _: &Project,
+        key: &str,
+        name: &str,
+        version: u32,
+    ) -> anyhow::Result<()> {
+        self.record(format!("sqlite-delete-snapshot {key} {name}@v{version}"));
+        Ok(())
+    }
+
+    fn sqlite_reset(
+        &self,
+        _: &Project,
+        workspace: &Workspace,
+        key: &str,
+        to: Option<DataSource>,
+        expect: BranchExpect,
+    ) -> anyhow::Result<SqliteResetDone> {
+        self.verify(workspace, key, expect)?;
+        self.record(format!("sqlite-reset {key} {} {to:?}", workspace.name));
+        Ok(SqliteResetDone {
+            source: "empty".into(),
+            method: None,
+            bytes: 0,
+        })
+    }
+
+    fn sqlite_drop(
+        &self,
+        _: &Project,
+        workspace: &Workspace,
+        key: &str,
+        expect: BranchExpect,
+    ) -> anyhow::Result<bool> {
+        self.verify(workspace, key, expect)?;
+        self.record(format!("sqlite-drop {key} {}", workspace.name));
+        Ok(true)
+    }
 }
 
 // A legal snapshot name that the masking would change.
@@ -1613,6 +1687,7 @@ fn services_fixture() -> (ServicesModel, Ids) {
             scanned: true,
         },
         details: Some(vec![cache, shop]),
+        sqlite: Vec::new(),
         error: None,
     };
     (model, ids)
@@ -2747,7 +2822,7 @@ fn without_mise_there_is_no_install_button_only_commands_to_copy(cx: &mut TestAp
                 path: None,
                 installed: false,
                 version: None,
-                missing_features: Vec::new(),
+                unsupported: None,
                 problem: None,
             }),
             install: Some(InstallPlan {
@@ -3506,6 +3581,7 @@ fn cleaning_up_missing_worktrees_lists_them_first_and_keeps_what_owns_data(
         service: "cache".into(),
         branch_id: Uuid::new_v4(),
         engine: Some(devflow_core::config::Engine::Valkey),
+        file: None,
     });
     receipt.save(&owner.git_dir).unwrap();
     let registered = |name: &str| root.join(".git/worktrees").join(name).is_dir();
@@ -3665,5 +3741,1362 @@ fn the_detail_shows_the_workspaces_port_and_stops_and_starts_its_containers(
     });
     frame(cx, h, |window| {
         assert!(window.try_find("detail-stop-services").is_none());
+    });
+}
+
+#[gpui_kit::test]
+fn the_detail_offers_suspend_resume_pin_and_focus_and_shows_their_state(cx: &mut TestAppContext) {
+    use devflow_core::focus::{Focused, Forward, Status, Target};
+    let DataRig { h, fake, ids, .. } = &data_rig(cx);
+    update(cx, h, |s, cx| s.set_tab(Tab::Workspaces, cx));
+    wait(cx, "the workspaces are read", |cx| {
+        cx.read_entity(&h.state, |s, _| s.busy().is_none())
+    });
+    install_workspaces(cx, h, fake, ids);
+    let focus_on = |name: &str, path: &std::path::Path| Status {
+        running: true,
+        pid: Some(1),
+        since: None,
+        workspace: Some(Focused {
+            name: name.into(),
+            path: path.to_path_buf(),
+            instance: Uuid::new_v4(),
+            ..Default::default()
+        }),
+        forwards: vec![Forward {
+            listen: 3000,
+            target: Target::App,
+            to: 43210,
+            reachable: None,
+        }],
+        failure: None,
+        ended: None,
+        log: "/tmp/focus.log".into(),
+    };
+
+    // Suspended, pinned and in focus: Resume instead of Suspend, a pill for
+    // each, and the focus button says where the ports go.
+    update(cx, h, |s, cx| {
+        let model = s.selection.current_mut().unwrap();
+        let feature = model
+            .workspaces
+            .iter_mut()
+            .find(|w| w.workspace.name == "feature-x")
+            .unwrap();
+        let path = feature.workspace.path.clone();
+        let receipt = feature.receipt.as_mut().unwrap();
+        receipt.suspended_at = Some(chrono::Utc::now());
+        receipt.pinned = true;
+        model.focus = Some(focus_on("feature-x", &path));
+        model.selected_workspace = Some(path);
+        cx.notify();
+    });
+    frame(cx, h, |window| {
+        assert!(window.find("detail-resume").visible());
+        assert!(window.try_find("detail-suspend").is_none());
+        assert!(window.find("detail-suspended").visible());
+        assert!(window.find("detail-pinned").visible());
+        assert!(window.find("detail-focused").visible());
+        assert!(window.find("detail-pin").visible());
+        assert!(window.find("detail-focus").visible());
+    });
+    // The list marks them too.
+    update(cx, h, |s, cx| s.set_tab(Tab::Workspaces, cx));
+    frame(cx, h, |window| {
+        assert!(window.find("workspace-suspended").visible());
+        assert!(window.find("workspace-pinned").visible());
+    });
+
+    // Nothing recorded, and the focus on another workspace.
+    update(cx, h, |s, cx| {
+        let model = s.selection.current_mut().unwrap();
+        let main_path = model
+            .workspaces
+            .iter()
+            .find(|w| w.workspace.is_default)
+            .unwrap()
+            .workspace
+            .path
+            .clone();
+        let feature = model
+            .workspaces
+            .iter_mut()
+            .find(|w| w.workspace.name == "feature-x")
+            .unwrap();
+        let receipt = feature.receipt.as_mut().unwrap();
+        receipt.suspended_at = None;
+        receipt.pinned = false;
+        model.focus = Some(focus_on("main", &main_path));
+        cx.notify();
+    });
+    frame(cx, h, |window| {
+        assert!(window.find("detail-suspend").visible());
+        assert!(window.try_find("detail-resume").is_none());
+        assert!(window.try_find("detail-suspended").is_none());
+        assert!(window.try_find("detail-pinned").is_none());
+        assert!(window.try_find("detail-focused").is_none());
+    });
+}
+
+// ---- sqlite services: a database that is a file in each workspace -----------------------
+
+use crate::services::{FileOwner, SqliteDb, SqliteService, SqliteSnapshotRow, SqliteSnapshots};
+
+/// The identities of the sqlite fixture: the database of each workspace and
+/// two snapshots (one named like a credential).
+struct SqliteIds {
+    main: Uuid,
+    feature: Uuid,
+    brought: Uuid,
+    seed: Uuid,
+}
+
+fn sqlite_db(
+    name: &str,
+    checkout: &Path,
+    is_default: bool,
+    id: Option<Uuid>,
+    source: Option<&str>,
+    owned: bool,
+    cloned: Option<&str>,
+) -> SqliteDb {
+    SqliteDb {
+        workspace: name.into(),
+        checkout: checkout.to_path_buf(),
+        file: checkout.join("db/app.sqlite3"),
+        is_default,
+        id,
+        exists: source.is_some(),
+        bytes: source.map(|_| 8192),
+        journal_mode: source.map(|_| if is_default { "wal" } else { "rollback" }.to_string()),
+        sidecars: Vec::new(),
+        source: source.map(str::to_string),
+        owned,
+        cloned: cloned.map(str::to_string),
+    }
+}
+
+/// A sqlite service over the three workspaces `main` (default, its own file),
+/// `feature-x` (devflow cloned it from main) and `brought` (it came with its
+/// own file), and one snapshot.
+fn sqlite_fixture(main: &Path) -> (SqliteService, SqliteIds) {
+    let ids = SqliteIds {
+        main: Uuid::new_v4(),
+        feature: Uuid::new_v4(),
+        brought: Uuid::new_v4(),
+        seed: Uuid::new_v4(),
+    };
+    let [main_path, feature, brought] = sqlite_paths(main);
+    let service = SqliteService {
+        key: "app".into(),
+        path: "db/app.sqlite3".into(),
+        library: "3.46.0".into(),
+        require_cow: false,
+        databases: Ok(vec![
+            sqlite_db(
+                "main",
+                &main_path,
+                true,
+                Some(ids.main),
+                Some("existing"),
+                false,
+                None,
+            ),
+            sqlite_db(
+                "feature-x",
+                &feature,
+                false,
+                Some(ids.feature),
+                Some("workspace:main"),
+                true,
+                Some("reflink"),
+            ),
+            sqlite_db(
+                "brought",
+                &brought,
+                false,
+                Some(ids.brought),
+                Some("existing"),
+                false,
+                None,
+            ),
+        ]),
+        snapshots: Ok(SqliteSnapshots {
+            ready: vec![SqliteSnapshotRow {
+                id: ids.seed,
+                name: "seed".into(),
+                version: 2,
+                bytes: Some(8192),
+                how: Some("reflink".into()),
+                source: "workspace:main".into(),
+                created: "2026-10-24 10:00".into(),
+                damaged: false,
+            }],
+            unfinished: 0,
+            damaged: 0,
+        }),
+    };
+    (service, ids)
+}
+
+fn sqlite_paths(main: &Path) -> [PathBuf; 3] {
+    [
+        main.to_path_buf(),
+        main.join("feature-x"),
+        main.join("brought"),
+    ]
+}
+
+/// The receipts "on disk" of the fixture's three workspaces: each binds the
+/// sqlite service `app` to the database the fixture lists.
+fn sqlite_receipts(ids: &SqliteIds) -> Vec<Receipt> {
+    let binding = |id, source: &str, owned, cloned| {
+        ServiceBinding::sqlite(
+            id,
+            "db/app.sqlite3".into(),
+            "sqlite:///elsewhere/db/app.sqlite3".into(),
+            source.into(),
+            owned,
+            CloneReport {
+                method: cloned,
+                ..CloneReport::default()
+            },
+            None,
+        )
+    };
+    [
+        binding(ids.main, "existing", false, None),
+        binding(
+            ids.feature,
+            "workspace:main",
+            true,
+            Some(devflow_core::services::catalog::CloneMethod::Reflink),
+        ),
+        binding(ids.brought, "existing", false, None),
+    ]
+    .into_iter()
+    .map(|binding| {
+        let mut receipt = Receipt::new(Uuid::new_v4(), "w", None);
+        receipt.services.insert("app".into(), binding);
+        receipt
+    })
+    .collect()
+}
+
+struct SqliteRig {
+    _scratch: Scratch,
+    h: Harness,
+    fake: Arc<FakeServices>,
+    ids: SqliteIds,
+    paths: [PathBuf; 3],
+}
+
+/// A scratch project on the Data tab whose only service is the fixture's
+/// sqlite one, served by the fake backend.
+fn sqlite_rig(cx: &mut TestAppContext) -> SqliteRig {
+    let scratch = scratch_project();
+    let h = open_scratch(cx, &scratch);
+    let main = main_path(cx, &h);
+    let (service, ids) = sqlite_fixture(&main);
+    let fake = FakeServices::new(
+        ServicesModel {
+            sqlite: vec![service],
+            ..ServicesModel::default()
+        },
+        REDIS_URL,
+    );
+    let for_state = fake.clone();
+    update(cx, &h, |s, cx| {
+        s.services = for_state;
+        s.set_tab(Tab::Data, cx);
+    });
+    wait(cx, "the sqlite service is read", |cx| {
+        cx.read_entity(&h.state, |s, _| {
+            s.selection
+                .current()
+                .is_some_and(|m| !m.services.sqlite.is_empty())
+        })
+    });
+    let paths = sqlite_paths(&main);
+    let rig = SqliteRig {
+        _scratch: scratch,
+        h,
+        fake,
+        ids,
+        paths,
+    };
+    install_sqlite_workspaces(cx, &rig);
+    rig
+}
+
+/// The fixture's three workspaces, with their receipts (a refresh reads the
+/// real list again and drops them, so a test that refreshes calls this once
+/// more).
+fn install_sqlite_workspaces(cx: &mut TestAppContext, rig: &SqliteRig) -> Vec<Receipt> {
+    let receipts = sqlite_receipts(&rig.ids);
+    let (fake, kept) = (rig.fake.clone(), receipts.clone());
+    let paths = rig.paths.clone();
+    update(cx, &rig.h, |s, cx| {
+        let model = s.selection.current_mut().unwrap();
+        let main = model.workspaces[0].clone();
+        model.workspaces = ["main", "feature-x", "brought"]
+            .into_iter()
+            .zip(&paths)
+            .zip(&kept)
+            .map(|((name, path), receipt)| {
+                let mut ws = main.clone();
+                ws.workspace.name = name.into();
+                ws.workspace.is_default = name == "main";
+                ws.workspace.path = path.clone();
+                ws.receipt = Some(receipt.clone());
+                fake.bind(name, receipt.clone());
+                ws
+            })
+            .collect();
+        cx.notify();
+    });
+    frame(cx, &rig.h, |_| {});
+    receipts
+}
+
+/// Click `opener` (scrolled into view in the sqlite page) and wait until the
+/// dialog it opens shows `inside`; dialogs slide in on the wall clock.
+fn open_sqlite_dialog(
+    cx: &mut TestAppContext,
+    h: &Harness,
+    opener: impl Into<gpui_kit::ElementId> + Clone,
+    inside: &'static str,
+) {
+    click_scrolled(cx, h, "sqlite-view", opener);
+    wait(cx, "the dialog opened", |cx| exists(cx, h, inside));
+    std::thread::sleep(Duration::from_millis(350));
+}
+
+fn finished(cx: &mut TestAppContext, rig: &SqliteRig) {
+    wait(cx, "the job finished", |cx| {
+        cx.read_entity(&rig.h.state, |s, _| s.busy().is_none())
+    });
+}
+
+fn sqlite_service_of(cx: &mut TestAppContext, h: &Harness) -> SqliteService {
+    cx.read_entity(&h.state, |s, _| {
+        s.selection
+            .current()
+            .unwrap()
+            .services
+            .sqlite_service("app")
+            .cloned()
+            .unwrap()
+    })
+}
+
+#[gpui_kit::test]
+fn the_data_tab_has_a_card_and_a_page_for_a_sqlite_service_and_no_container_controls(
+    cx: &mut TestAppContext,
+) {
+    let rig = sqlite_rig(cx);
+    let h = &rig.h;
+    for target in [
+        "data-tab",
+        "service-card-app",
+        "service-card-file",
+        "sqlite-view",
+        "sqlite-header",
+        "sqlite-engine",
+        "sqlite-library",
+        "sqlite-databases",
+        "sqlite-snapshots",
+    ] {
+        assert!(exists(cx, h, target), "{target}");
+    }
+    for ix in 0..3usize {
+        for target in [
+            "sqlite-db",
+            "sqlite-db-size",
+            "sqlite-db-mode",
+            "sqlite-db-source",
+            "sqlite-db-clone",
+            "sqlite-db-owner",
+            "sqlite-db-path",
+        ] {
+            assert!(exists(cx, h, (target, ix)), "{target} {ix}");
+        }
+    }
+    assert!(exists(cx, h, ("sqlite-snapshot", 0usize)));
+    // A file has nothing to start, stop, measure or reach: none of the
+    // container page's controls are drawn, and no empty-state invitation.
+    for gone in [
+        "service-view",
+        "service-header",
+        "service-measure",
+        "service-reconcile",
+    ] {
+        assert!(!exists(cx, h, gone), "{gone}");
+    }
+    assert!(!exists(cx, h, ("service-start", 0usize)));
+    assert!(!exists(cx, h, ("service-copy-url", 0usize)));
+    // Nothing is unfinished, damaged or unreadable.
+    for gone in [
+        "sqlite-unfinished",
+        "sqlite-damaged",
+        "sqlite-databases-error",
+    ] {
+        assert!(!exists(cx, h, gone), "{gone}");
+    }
+
+    // The card: the engine is a word, the counts are of files.
+    let cards = cx.read_entity(&h.state, |s, _| data_cards(s.selection.current().unwrap()));
+    let [card] = &cards[..] else {
+        panic!("{cards:?}");
+    };
+    assert_eq!((card.key.as_str(), card.engine.as_str()), ("app", "sqlite"));
+    assert!(card.file && !card.postgres);
+    assert_eq!((card.branches, card.snapshots), (Some(3), Some(1)));
+    assert_eq!(counts_text(card), "3 databases · 1 snapshot");
+    assert_eq!((card.unfinished, card.damaged), (0, 0));
+    assert_eq!(card.running, Running::NotRead);
+    assert_eq!(
+        cx.read_entity(&h.state, |s, _| s.selected_data_service()),
+        Some("app".to_string())
+    );
+}
+
+#[gpui_kit::test]
+fn the_pages_rows_say_size_journal_source_clone_and_owner_in_words(cx: &mut TestAppContext) {
+    use super::sqlite_view::{database_cells, library_text, snapshot_cells};
+    let rig = sqlite_rig(cx);
+    let service = sqlite_service_of(cx, &rig.h);
+    assert_eq!(library_text(&service), "SQLite 3.46.0 (bundled)");
+    let rows: Vec<_> = service
+        .databases
+        .as_ref()
+        .unwrap()
+        .iter()
+        .map(database_cells)
+        .collect();
+    let words: Vec<_> = rows
+        .iter()
+        .map(|c| {
+            (
+                c.workspace.as_str(),
+                c.size.as_str(),
+                c.mode.as_str(),
+                c.source.as_str(),
+                c.clone.as_str(),
+                c.owner,
+            )
+        })
+        .collect();
+    assert_eq!(
+        words,
+        [
+            (
+                "main",
+                "8.0 kB",
+                "WAL",
+                "the file that was already there",
+                "nothing cloned",
+                "the project's own file"
+            ),
+            (
+                "feature-x",
+                "8.0 kB",
+                "rollback journal",
+                "workspace main",
+                "cloned by reflink",
+                "created by this workspace"
+            ),
+            (
+                "brought",
+                "8.0 kB",
+                "rollback journal",
+                "the file that was already there",
+                "nothing cloned",
+                "was already in the workspace"
+            ),
+        ]
+    );
+    let seed = snapshot_cells(&service.snapshots.as_ref().unwrap().ready[0]);
+    assert_eq!(seed.label, "seed@v2");
+    assert_eq!(seed.size, "8.0 kB");
+    assert_eq!(seed.how, "taken by reflink (blocks shared)");
+    assert_eq!(seed.from, "from workspace main");
+}
+
+#[gpui_kit::test]
+fn a_mixed_project_has_cards_for_containers_and_files_with_each_ones_own_counts(
+    cx: &mut TestAppContext,
+) {
+    let rig = sqlite_rig(cx);
+    let h = &rig.h;
+    // Add the container fixture beside the sqlite service.
+    let (containers, _) = services_fixture();
+    update(cx, h, |s, cx| {
+        let model = s.selection.current_mut().unwrap();
+        let sqlite = std::mem::take(&mut model.services.sqlite);
+        model.services = ServicesModel {
+            sqlite,
+            ..containers
+        };
+        cx.notify();
+    });
+    frame(cx, h, |_| {});
+    let cards = cx.read_entity(&h.state, |s, _| data_cards(s.selection.current().unwrap()));
+    let counts: Vec<_> = cards
+        .iter()
+        .map(|c| (c.key.as_str(), c.engine.as_str(), counts_text(c)))
+        .collect();
+    assert_eq!(
+        counts,
+        [
+            ("cache", "valkey", "3 branches · 2 snapshots".to_string()),
+            ("shop-data", "mysql", "1 branch · 0 snapshots".to_string()),
+            ("app", "sqlite", "3 databases · 1 snapshot".to_string()),
+        ],
+        "the files come after the containers"
+    );
+    for key in ["cache", "shop-data", "app"] {
+        let card = super::setup_tests::id(format!("service-card-{key}"));
+        assert!(exists(cx, h, card), "{key}");
+    }
+    // Choosing the container card shows its page, and the file's shows its own.
+    click(cx, h, "service-card-cache");
+    assert!(exists(cx, h, "service-view") && !exists(cx, h, "sqlite-view"));
+    click(cx, h, "service-card-app");
+    assert!(exists(cx, h, "sqlite-view") && !exists(cx, h, "service-view"));
+
+    // The overview counts the files as databases, the containers as branches.
+    let lines = cx.read_entity(&h.state, |s, _| {
+        super::overview::numbers(s.selection.current().unwrap(), &[], None).services
+    });
+    let texts: Vec<_> = lines
+        .iter()
+        .map(|l| (l.key.as_str(), l.count_text()))
+        .collect();
+    assert_eq!(
+        texts.last(),
+        Some(&("app", "3 databases".to_string())),
+        "{texts:?}"
+    );
+    assert!(
+        texts.contains(&("cache", "3 branches".to_string())),
+        "{texts:?}"
+    );
+}
+
+#[gpui_kit::test]
+fn counts_are_singular_or_plural_and_unreadable_ones_are_unavailable_not_zero(
+    cx: &mut TestAppContext,
+) {
+    let (mut service, _) = sqlite_fixture(Path::new("/tmp/shop"));
+    let dir = tempfile::tempdir().unwrap();
+    let card_of = |service: &SqliteService| {
+        let mut model = super::ui_tests::loaded_model(dir.path());
+        model.database.configured = false;
+        model.services = ServicesModel {
+            sqlite: vec![service.clone()],
+            ..ServicesModel::default()
+        };
+        data_cards(&model).remove(0)
+    };
+    let text = |service: &SqliteService| counts_text(&card_of(service));
+    assert_eq!(text(&service), "3 databases · 1 snapshot");
+    // One file and one snapshot.
+    service.databases.as_mut().unwrap().truncate(1);
+    assert_eq!(text(&service), "1 database · 1 snapshot");
+    // None: zero, because it was read.
+    service.databases.as_mut().unwrap().clear();
+    service.snapshots.as_mut().unwrap().ready.clear();
+    assert_eq!(text(&service), "0 databases · 0 snapshots");
+    // A workspace without a file yet is not a database.
+    let absent = sqlite_db("w", Path::new("/tmp/w"), false, None, None, false, None);
+    assert!(!absent.exists);
+    service.databases = Ok(vec![absent]);
+    assert_eq!(text(&service), "0 databases · 0 snapshots");
+    // Warnings: operations that did not end and snapshots that lost their file.
+    service.snapshots.as_mut().unwrap().unfinished = 2;
+    service.snapshots.as_mut().unwrap().damaged = 1;
+    let card = card_of(&service);
+    assert_eq!((card.unfinished, card.damaged), (2, 1));
+    // Failures are unknown, each on its own.
+    service.snapshots = Err("catalog.json: invalid".into());
+    assert_eq!(text(&service), "0 databases · snapshots unavailable");
+    service.databases = Err("cannot list the worktrees".into());
+    assert_eq!(
+        text(&service),
+        "databases unavailable · snapshots unavailable"
+    );
+    let card = card_of(&service);
+    assert_eq!((card.branches, card.snapshots), (None, None));
+    assert_eq!((card.unfinished, card.damaged), (0, 0));
+    let _ = cx;
+}
+
+#[gpui_kit::test]
+fn an_unreadable_service_shows_why_in_the_page_instead_of_an_empty_list(cx: &mut TestAppContext) {
+    let rig = sqlite_rig(cx);
+    let h = &rig.h;
+    update(cx, h, |s, cx| {
+        let model = s.selection.current_mut().unwrap();
+        let service = &mut model.services.sqlite[0];
+        service.databases = Err("cannot read the worktrees".into());
+        service.snapshots = Err("catalog.json: invalid".into());
+        cx.notify();
+    });
+    frame(cx, h, |_| {});
+    assert!(exists(cx, h, "sqlite-databases-error"));
+    assert!(exists(cx, h, "sqlite-snapshots-error"));
+    // Not "no workspaces" and not "no snapshots".
+    assert!(!exists(cx, h, ("sqlite-db", 0usize)));
+    let service = sqlite_service_of(cx, h);
+    assert!(super::sqlite_view::databases_hint(&service).starts_with("unavailable"));
+    assert!(super::sqlite_view::snapshots_hint(&service).starts_with("unavailable"));
+}
+
+#[gpui_kit::test]
+fn a_snapshot_is_taken_from_a_dialog_for_the_workspace_asked_and_held_to_its_database(
+    cx: &mut TestAppContext,
+) {
+    let rig = sqlite_rig(cx);
+    let SqliteRig { h, fake, ids, .. } = &rig;
+    // From the page's button: the dialog offers every workspace with a file.
+    open_sqlite_dialog(cx, h, "sqlite-snapshot-create", "sqlite-snapshot-save");
+    let choices = cx.read_entity(&h.state, |s, _| {
+        super::sqlite_dialogs::snapshot_choices(s, "app")
+            .into_iter()
+            .map(|c| (c.label, c.expect.map(|e| e.branch)))
+            .collect::<Vec<_>>()
+    });
+    assert_eq!(
+        choices,
+        [
+            ("main".to_string(), Some(ids.main)),
+            ("feature-x".to_string(), Some(ids.feature)),
+            ("brought".to_string(), Some(ids.brought)),
+        ]
+    );
+    cancel_dialog(cx, h);
+    assert!(fake.calls().iter().all(|c| !c.starts_with("sqlite-")));
+
+    // From a row: that workspace is preselected.
+    open_sqlite_dialog(
+        cx,
+        h,
+        ("sqlite-db-snapshot", 1usize),
+        "sqlite-snapshot-save",
+    );
+    click(cx, h, "sqlite-snapshot-name");
+    cx.update_window(h.window.into(), |_, window, cx| {
+        window.input("baseline", cx)
+    })
+    .unwrap();
+    click(cx, h, "sqlite-snapshot-save");
+    wait(cx, "the snapshot was taken", |_| {
+        fake.calls()
+            .contains(&"sqlite-snapshot app feature-x baseline".to_string())
+    });
+    finished(cx, &rig);
+    cx.read_entity(&h.state, |s, _| {
+        let activity = s.activity.as_ref().expect("the job left its output");
+        assert_eq!(activity.title, "Snapshot baseline of app");
+        let log = activity.log.text();
+        assert!(log.contains("under SQLite's own locks"), "{log}");
+        assert!(
+            log.contains("baseline@v1") && log.contains("taken by reflink"),
+            "{log}"
+        );
+        assert!(matches!(activity.outcome, Some(Ok(_))));
+    });
+
+    // A name is required.
+    open_sqlite_dialog(cx, h, "sqlite-snapshot-create", "sqlite-snapshot-save");
+    click(cx, h, "sqlite-snapshot-save");
+    assert!(
+        exists(cx, h, "sqlite-snapshot-save"),
+        "the dialog stays open"
+    );
+    cancel_dialog(cx, h);
+}
+
+#[gpui_kit::test]
+fn a_snapshot_dialog_opened_for_a_workspace_that_was_set_up_again_changes_nothing(
+    cx: &mut TestAppContext,
+) {
+    let rig = sqlite_rig(cx);
+    let SqliteRig { h, fake, .. } = &rig;
+    let shown = install_sqlite_workspaces(cx, &rig);
+    open_sqlite_dialog(
+        cx,
+        h,
+        ("sqlite-db-snapshot", 1usize),
+        "sqlite-snapshot-save",
+    );
+    // `setup --new-instance` in between: another instance, another database.
+    let mut next = shown[1].clone();
+    next.instance_id = Uuid::new_v4();
+    fake.bind("feature-x", next);
+    click(cx, h, "sqlite-snapshot-name");
+    cx.update_window(h.window.into(), |_, window, cx| {
+        window.input("baseline", cx)
+    })
+    .unwrap();
+    click(cx, h, "sqlite-snapshot-save");
+    wait(cx, "the snapshot was refused", |cx| {
+        failure_of(cx, h, "Snapshot baseline").is_some()
+            && cx.read_entity(&h.state, |s, _| s.busy().is_none())
+    });
+    let message = failure_of(cx, h, "Snapshot baseline").unwrap();
+    assert!(
+        message.contains("changed since you reviewed it"),
+        "{message}"
+    );
+    assert!(
+        fake.calls()
+            .iter()
+            .all(|c| !c.starts_with("sqlite-snapshot"))
+    );
+}
+
+#[gpui_kit::test]
+fn a_snapshot_core_refuses_comes_back_with_its_message_and_remedies_as_buttons(
+    cx: &mut TestAppContext,
+) {
+    let rig = sqlite_rig(cx);
+    let SqliteRig { h, fake, .. } = &rig;
+    fake.sqlite_locked
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    open_sqlite_dialog(
+        cx,
+        h,
+        ("sqlite-db-snapshot", 1usize),
+        "sqlite-snapshot-save",
+    );
+    click(cx, h, "sqlite-snapshot-name");
+    cx.update_window(h.window.into(), |_, window, cx| {
+        window.input("baseline", cx)
+    })
+    .unwrap();
+    click(cx, h, "sqlite-snapshot-save");
+    wait(cx, "the snapshot was refused", |cx| {
+        failure_of(cx, h, "Snapshot baseline").is_some()
+            && cx.read_entity(&h.state, |s, _| s.busy().is_none())
+    });
+    let message = failure_of(cx, h, "Snapshot baseline").unwrap();
+    assert!(message.contains("locked for writing"), "{message}");
+    // What core says to do is a button each, in core's order: no command.
+    let kinds = cx.read_entity(&h.state, |s, _| {
+        s.activity
+            .as_ref()
+            .unwrap()
+            .remedies
+            .iter()
+            .map(|r| r.kind())
+            .collect::<Vec<_>>()
+    });
+    assert_eq!(kinds, ["retry", "open_file"]);
+    frame(cx, h, |_| {});
+    for button in ["activity-fix-0-retry", "activity-fix-1-open_file"] {
+        assert!(
+            exists(cx, h, super::setup_tests::id(button.to_string())),
+            "{button}"
+        );
+    }
+}
+
+#[gpui_kit::test]
+fn a_reset_or_drop_confirmed_after_a_new_instance_took_the_workspace_changes_nothing(
+    cx: &mut TestAppContext,
+) {
+    let rig = sqlite_rig(cx);
+    let SqliteRig { h, fake, .. } = &rig;
+    let shown = install_sqlite_workspaces(cx, &rig);
+    let replaced = |old: &Receipt| {
+        let mut next = old.clone();
+        next.instance_id = Uuid::new_v4();
+        next
+    };
+    // The dialogs show feature-x; by the time they are confirmed it is another
+    // instance, bound to a database of its own.
+    open_sqlite_dialog(cx, h, ("sqlite-db-reset", 1usize), "sqlite-reset-confirm");
+    fake.bind("feature-x", replaced(&shown[1]));
+    click(cx, h, "sqlite-reset-confirm");
+    wait(cx, "the reset was refused", |cx| {
+        failure_of(cx, h, "Reset app").is_some()
+            && cx.read_entity(&h.state, |s, _| s.busy().is_none())
+    });
+    let message = failure_of(cx, h, "Reset app").unwrap();
+    assert!(
+        message.contains("changed since you reviewed it"),
+        "{message}"
+    );
+
+    let shown = install_sqlite_workspaces(cx, &rig);
+    open_sqlite_dialog(cx, h, ("sqlite-db-drop", 1usize), "confirm");
+    fake.bind("feature-x", replaced(&shown[1]));
+    click(cx, h, "confirm");
+    wait(cx, "the drop was refused", |cx| {
+        failure_of(cx, h, "Drop app").is_some()
+            && cx.read_entity(&h.state, |s, _| s.busy().is_none())
+    });
+    let message = failure_of(cx, h, "Drop app").unwrap();
+    assert!(
+        message.contains("changed since you reviewed it"),
+        "{message}"
+    );
+    assert!(
+        fake.calls().iter().all(|c| !c.starts_with("sqlite-")),
+        "the replacement's database was not touched: {:?}",
+        fake.calls()
+    );
+}
+
+#[gpui_kit::test]
+fn a_reset_asks_first_says_what_is_lost_and_offers_the_sources_core_knows(cx: &mut TestAppContext) {
+    let rig = sqlite_rig(cx);
+    let SqliteRig { h, fake, paths, .. } = &rig;
+    // feature-x's database was made by devflow: Reset is offered.
+    open_sqlite_dialog(cx, h, ("sqlite-db-reset", 1usize), "sqlite-reset-confirm");
+    assert!(exists(cx, h, "sqlite-reset-dialog"));
+    cancel_dialog(cx, h);
+    assert!(fake.calls().iter().all(|c| !c.starts_with("sqlite-reset")));
+
+    open_sqlite_dialog(cx, h, ("sqlite-db-reset", 1usize), "sqlite-reset-confirm");
+    click(cx, h, "sqlite-reset-confirm");
+    wait(cx, "the reset ran", |_| {
+        fake.calls()
+            .contains(&"sqlite-reset app feature-x None".to_string())
+    });
+    finished(cx, &rig);
+    cx.read_entity(&h.state, |s, _| {
+        let activity = s.activity.as_ref().unwrap();
+        assert_eq!(activity.title, "Reset app of feature-x");
+        assert!(activity.log.text().contains("fresh copy"));
+        assert!(matches!(activity.outcome, Some(Ok(_))));
+    });
+
+    // The choices: the recorded source, nothing, another workspace by its
+    // checkout, a snapshot by its recorded name and version.
+    let (service, db) = {
+        let service = sqlite_service_of(cx, h);
+        let db = service.database_at(&paths[1]).cloned().unwrap();
+        (service, db)
+    };
+    let options = super::sqlite_dialogs::reset_options(&service, &db);
+    let labels: Vec<_> = options.iter().map(|o| o.label.as_str()).collect();
+    assert_eq!(
+        labels,
+        [
+            "Recorded source (workspace main)",
+            "Empty database",
+            "Workspace main",
+            "Workspace brought",
+            "Snapshot seed@v2",
+        ]
+    );
+    assert_eq!(options[0].source, None);
+    assert_eq!(options[1].source, Some(DataSource::Empty));
+    assert_eq!(
+        options[2].source,
+        Some(DataSource::Workspace {
+            name: paths[0].display().to_string()
+        })
+    );
+    assert_eq!(
+        options[4].source,
+        Some(DataSource::Snapshot {
+            name: "seed".into(),
+            version: Some(2)
+        })
+    );
+    // The confirmation says what is lost and what stays.
+    let text =
+        super::sqlite_dialogs::reset_lines("app", "feature-x", "~/shop/db/app.sqlite3").join(" ");
+    assert!(text.contains("feature-x wrote to ~/shop/db/app.sqlite3 since it was copied is lost"));
+    assert!(text.contains("same path") && text.contains("Snapshots are not touched"));
+}
+
+#[gpui_kit::test]
+fn what_core_would_refuse_is_disabled_with_its_reason_and_opens_nothing(cx: &mut TestAppContext) {
+    let rig = sqlite_rig(cx);
+    let SqliteRig { h, fake, .. } = &rig;
+    // The default workspace's file (row 0) and a file that was already in the
+    // workspace (row 2): neither button does anything.
+    for ix in [0usize, 2] {
+        for button in ["sqlite-db-reset", "sqlite-db-drop"] {
+            click_scrolled(cx, h, "sqlite-view", (button, ix));
+            std::thread::sleep(Duration::from_millis(100));
+            cx.run_until_parked();
+            assert!(!exists(cx, h, "sqlite-reset-dialog"), "{button} {ix}");
+            assert!(!exists(cx, h, "confirm"), "{button} {ix}");
+        }
+    }
+    assert!(fake.calls().iter().all(|c| !c.starts_with("sqlite-")));
+    // The reasons are core's rules in words.
+    let service = sqlite_service_of(cx, h);
+    let owners: Vec<_> = service
+        .databases
+        .as_ref()
+        .unwrap()
+        .iter()
+        .map(|d| d.owner())
+        .collect();
+    assert_eq!(
+        owners,
+        [
+            FileOwner::Project,
+            FileOwner::Workspace,
+            FileOwner::AlreadyThere
+        ]
+    );
+    // A dialog asked for anyway (the palette, a stale button) is refused with
+    // the same reason, without reaching core.
+    let why = cx.read_entity(&h.state, |s, _| {
+        super::sqlite_dialogs::bound_database(s, "app", &rig.paths[0])
+            .map(|_| ())
+            .unwrap_err()
+    });
+    assert!(why.contains("project's own file"), "{why}");
+    let why = cx.read_entity(&h.state, |s, _| {
+        super::sqlite_dialogs::bound_database(s, "app", &rig.paths[2])
+            .map(|_| ())
+            .unwrap_err()
+    });
+    assert!(why.contains("did not make"), "{why}");
+}
+
+#[gpui_kit::test]
+fn a_database_is_dropped_after_a_confirmation_that_says_what_is_lost(cx: &mut TestAppContext) {
+    let rig = sqlite_rig(cx);
+    let SqliteRig { h, fake, .. } = &rig;
+    open_sqlite_dialog(cx, h, ("sqlite-db-drop", 1usize), "confirm");
+    cancel_dialog(cx, h);
+    assert!(fake.calls().iter().all(|c| !c.starts_with("sqlite-drop")));
+    open_sqlite_dialog(cx, h, ("sqlite-db-drop", 1usize), "confirm");
+    click(cx, h, "confirm");
+    wait(cx, "the database was dropped", |_| {
+        fake.calls()
+            .contains(&"sqlite-drop app feature-x".to_string())
+    });
+    finished(cx, &rig);
+    cx.read_entity(&h.state, |s, _| {
+        let activity = s.activity.as_ref().unwrap();
+        assert_eq!(activity.title, "Drop app of feature-x");
+        assert!(matches!(activity.outcome, Some(Ok(_))));
+    });
+    let text =
+        super::sqlite_dialogs::drop_lines("app", "feature-x", "~/shop/db/app.sqlite3").join(" ");
+    assert!(
+        text.contains("is removed with the files SQLite keeps beside it"),
+        "{text}"
+    );
+    assert!(
+        text.contains("whatever feature-x wrote to it is lost"),
+        "{text}"
+    );
+}
+
+#[gpui_kit::test]
+fn a_snapshot_is_deleted_by_its_recorded_name_and_version_after_a_confirmation(
+    cx: &mut TestAppContext,
+) {
+    let rig = sqlite_rig(cx);
+    let SqliteRig { h, fake, .. } = &rig;
+    open_sqlite_dialog(cx, h, ("sqlite-snapshot-delete", 0usize), "confirm");
+    cancel_dialog(cx, h);
+    assert!(fake.calls().iter().all(|c| !c.starts_with("sqlite-delete")));
+    open_sqlite_dialog(cx, h, ("sqlite-snapshot-delete", 0usize), "confirm");
+    click(cx, h, "confirm");
+    wait(cx, "the snapshot was deleted", |_| {
+        fake.calls()
+            .contains(&"sqlite-delete-snapshot app seed@v2".to_string())
+    });
+    finished(cx, &rig);
+    cx.read_entity(&h.state, |s, _| {
+        let activity = s.activity.as_ref().unwrap();
+        assert_eq!(activity.title, "Delete snapshot seed@v2 of app");
+        assert!(matches!(activity.outcome, Some(Ok(_))));
+    });
+}
+
+#[gpui_kit::test]
+fn a_name_that_looks_like_a_credential_is_drawn_masked_and_still_acted_on_as_recorded(
+    cx: &mut TestAppContext,
+) {
+    // kingfisher:ignore
+    let odd = "password=hunter2";
+    let rig = sqlite_rig(cx);
+    let SqliteRig { h, fake, ids, .. } = &rig;
+    update(cx, h, |s, cx| {
+        let model = s.selection.current_mut().unwrap();
+        let service = &mut model.services.sqlite[0];
+        let snapshots = service.snapshots.as_mut().unwrap();
+        snapshots.ready[0].name = odd.into();
+        snapshots.ready[0].source = format!("workspace:{odd}");
+        if let Ok(rows) = &mut service.databases {
+            rows[1].workspace = odd.into();
+            rows[1].source = Some(format!("workspace:{odd}"));
+        }
+        cx.notify();
+    });
+    let service = sqlite_service_of(cx, h);
+    // What the page draws.
+    let drawn = {
+        let rows = service.databases.as_ref().unwrap();
+        let snapshot = &service.snapshots.as_ref().unwrap().ready[0];
+        let mut texts = vec![
+            super::sqlite_view::snapshot_cells(snapshot).label,
+            super::sqlite_view::snapshot_cells(snapshot).from,
+        ];
+        texts.extend({
+            let cells = super::sqlite_view::database_cells(&rows[1]);
+            [cells.workspace, cells.source]
+        });
+        texts.extend(
+            super::sqlite_dialogs::reset_options(&service, &rows[0])
+                .into_iter()
+                .map(|o| o.label),
+        );
+        texts.extend(super::sqlite_dialogs::delete_lines(
+            "app",
+            &snapshot.label(),
+        ));
+        texts.join("\n")
+    };
+    assert!(!drawn.contains("hunter2"), "{drawn}");
+    assert!(drawn.contains("password=***"), "{drawn}");
+    // The delete acts on the recorded name.
+    frame(cx, h, |_| {});
+    open_sqlite_dialog(cx, h, ("sqlite-snapshot-delete", 0usize), "confirm");
+    click(cx, h, "confirm");
+    wait(cx, "the snapshot was deleted", |_| {
+        fake.calls()
+            .contains(&format!("sqlite-delete-snapshot app {odd}@v2"))
+    });
+    let _ = ids;
+}
+
+#[gpui_kit::test]
+fn unfinished_and_damaged_snapshots_are_warned_about_with_the_remedy_core_names(
+    cx: &mut TestAppContext,
+) {
+    let rig = sqlite_rig(cx);
+    let SqliteRig { h, fake, .. } = &rig;
+    update(cx, h, |s, cx| {
+        let snapshots = s.selection.current_mut().unwrap().services.sqlite[0]
+            .snapshots
+            .as_mut()
+            .unwrap();
+        snapshots.unfinished = 1;
+        snapshots.damaged = 1;
+        snapshots.ready[0].damaged = true;
+        cx.notify();
+    });
+    frame(cx, h, |_| {});
+    assert!(exists(cx, h, "sqlite-unfinished"));
+    assert!(exists(cx, h, "sqlite-damaged"));
+    assert!(exists(cx, h, ("sqlite-snapshot-damaged", 0usize)));
+    let cards = cx.read_entity(&h.state, |s, _| data_cards(s.selection.current().unwrap()));
+    assert_eq!((cards[0].unfinished, cards[0].damaged), (1, 1));
+
+    // The button is the remedy core names for an interrupted operation, and
+    // it settles the service through the same job as the container pages.
+    let remedies = cx.read_entity(&h.state, |s, _| {
+        let model = s.selection.current().unwrap();
+        super::sqlite_view::snapshot_remedies(
+            &model.project_ref(),
+            model.services.sqlite_service("app").unwrap(),
+        )
+    });
+    assert_eq!(
+        remedies.iter().map(|r| r.kind()).collect::<Vec<_>>(),
+        ["reconcile_service"]
+    );
+    click_scrolled(cx, h, "sqlite-view", "sqlite-remedy-0-reconcile_service");
+    wait(cx, "the service was reconciled", |_| {
+        fake.calls().contains(&"reconcile app".to_string())
+    });
+    finished(cx, &rig);
+    cx.read_entity(&h.state, |s, _| {
+        assert_eq!(s.activity.as_ref().unwrap().title, "Reconcile app");
+    });
+}
+
+#[gpui_kit::test]
+fn the_palette_snapshots_a_sqlite_service_through_its_own_dialog(cx: &mut TestAppContext) {
+    let rig = sqlite_rig(cx);
+    let h = &rig.h;
+    let entries = cx.read_entity(&h.state, |s, _| super::palette::drawn_texts(s));
+    for wanted in ["Snapshot data…", "Reset data…", "of app"] {
+        assert!(entries.iter().any(|e| e == wanted), "{wanted}: {entries:?}");
+    }
+    cx.update_window(h.window.into(), |_, window, cx| {
+        super::palette::PaletteAction::SnapshotData.run(&h.state, window, cx)
+    })
+    .unwrap();
+    wait(cx, "the sqlite dialog opened", |cx| {
+        exists(cx, h, "sqlite-snapshot-save")
+    });
+    assert!(!exists(cx, &rig.h, "service-snapshot-save"));
+}
+
+#[gpui_kit::test]
+fn a_workspace_bound_to_a_sqlite_file_shows_the_file_and_its_url_in_the_detail(
+    cx: &mut TestAppContext,
+) {
+    let rig = sqlite_rig(cx);
+    let h = &rig.h;
+    update(cx, h, |s, cx| {
+        s.tab = Tab::Workspaces;
+        let feature = rig.paths[1].clone();
+        let model = s.selection.current_mut().unwrap();
+        model.selected_workspace = Some(feature);
+        cx.notify();
+    });
+    frame(cx, h, |_| {});
+    assert!(exists(cx, h, "detail-connections"));
+    assert!(exists(cx, h, "connection-copy-path-app"));
+    assert!(exists(cx, h, "connection-copy-app"));
+    // A file has no password to reveal, and nothing to stop or start.
+    assert!(!exists(cx, h, "detail-reveal"));
+    assert!(!exists(cx, h, "detail-stop-services"));
+    let detail = cx.read_entity(&h.state, |s, _| {
+        let model = s.selection.current().unwrap();
+        super::workspace_detail::Detail::of(model, model.selected_status().unwrap())
+    });
+    let conn = &detail.connections[0];
+    assert_eq!(conn.facts, "SQLite file db/app.sqlite3 · cloned by reflink");
+    assert_eq!(
+        conn.file.as_deref(),
+        Some(rig.paths[1].join("db/app.sqlite3").as_path())
+    );
+    assert!(conn.url.starts_with("sqlite://") && conn.url.ends_with("/feature-x/db/app.sqlite3"));
+    assert_eq!(conn.ownership, "created by this workspace");
+}
+
+/// Core's own sentences for what a person can do about a SQLite database
+/// never carry a command line: the app's texts are words and buttons.
+#[gpui_kit::test]
+fn nothing_the_sqlite_screens_say_is_a_command_line(cx: &mut TestAppContext) {
+    let rig = sqlite_rig(cx);
+    let service = sqlite_service_of(cx, &rig.h);
+    let mut texts: Vec<String> = Vec::new();
+    for owner in [
+        FileOwner::Workspace,
+        FileOwner::Project,
+        FileOwner::AlreadyThere,
+        FileOwner::NotSetUp,
+    ] {
+        texts.push(owner.label().to_string());
+        texts.extend(owner.refusal().map(str::to_string));
+    }
+    for db in service.databases.as_ref().unwrap() {
+        let cells = super::sqlite_view::database_cells(db);
+        texts.extend([cells.size, cells.mode, cells.source, cells.clone]);
+        texts.extend(
+            super::sqlite_dialogs::reset_options(&service, db)
+                .into_iter()
+                .map(|o| o.label),
+        );
+    }
+    for snapshot in &service.snapshots.as_ref().unwrap().ready {
+        let cells = super::sqlite_view::snapshot_cells(snapshot);
+        texts.extend([cells.how, cells.from]);
+    }
+    texts.extend(super::sqlite_dialogs::reset_lines(
+        "app",
+        "w",
+        "db/app.sqlite3",
+    ));
+    texts.extend(super::sqlite_dialogs::drop_lines(
+        "app",
+        "w",
+        "db/app.sqlite3",
+    ));
+    texts.extend(super::sqlite_dialogs::delete_lines("app", "seed@v2"));
+    texts.push(super::sqlite_view::unfinished_text(2));
+    texts.push(super::sqlite_view::damaged_text(&["seed@v2".to_string()]));
+    texts.push(super::sqlite_view::databases_hint(&service));
+    texts.push(super::sqlite_view::snapshots_hint(&service));
+    texts.extend(crate::services::sqlite_reconciled_lines(
+        &devflow_core::sqlite::Reconciled {
+            abandoned: vec!["a@v1".into()],
+            removed: vec!["b@v1".into()],
+            damaged: vec!["c@v1".into()],
+        },
+    ));
+    texts.push(
+        devflow_core::remedy::Remedy::ReconcileService {
+            root: "/p".into(),
+            key: "app".into(),
+        }
+        .label(),
+    );
+    let commands = [
+        "devflow service",
+        "devflow db",
+        "devflow setup",
+        "devflow exec",
+        "devflow trust",
+        "devflow up",
+        "devflow down",
+        "devflow switch",
+        "devflow doctor",
+        "devflow reset",
+        "devflow snapshot",
+        "devflow drop",
+        "devflow reconcile",
+    ];
+    for text in &texts {
+        assert!(!text.contains('`'), "{text}");
+        for command in commands {
+            assert!(!text.contains(command), "{text}");
+        }
+    }
+    // The sources of the views and dialogs hold no such literal either.
+    for (name, source) in [
+        ("sqlite_view.rs", include_str!("sqlite_view.rs")),
+        ("sqlite_dialogs.rs", include_str!("sqlite_dialogs.rs")),
+    ] {
+        for command in commands {
+            assert!(!source.contains(command), "{name}: {command}");
+        }
+    }
+}
+
+/// A valid, empty SQLite database of one 4096-byte page (what SQLite itself
+/// writes for a database with no tables), in WAL mode or not.
+fn empty_sqlite(wal: bool) -> Vec<u8> {
+    let mut page = vec![0u8; 4096];
+    page[..16].copy_from_slice(b"SQLite format 3\0");
+    page[16..18].copy_from_slice(&4096u16.to_be_bytes());
+    page[18] = if wal { 2 } else { 1 };
+    page[19] = page[18];
+    page[21..24].copy_from_slice(&[64, 32, 32]);
+    page[24..28].copy_from_slice(&1u32.to_be_bytes());
+    page[28..32].copy_from_slice(&1u32.to_be_bytes());
+    page[44..48].copy_from_slice(&4u32.to_be_bytes());
+    page[56..60].copy_from_slice(&1u32.to_be_bytes());
+    page[92..96].copy_from_slice(&1u32.to_be_bytes());
+    page[96..100].copy_from_slice(&3_046_000u32.to_be_bytes());
+    // An empty table b-tree leaf, the root page of `sqlite_master`.
+    page[100] = 0x0d;
+    page[105..107].copy_from_slice(&4096u16.to_be_bytes());
+    page
+}
+
+#[gpui_kit::test]
+fn a_project_whose_only_service_is_a_sqlite_file_works_with_core_and_without_docker(
+    cx: &mut TestAppContext,
+) {
+    use super::sqlite_view::{database_cells, snapshot_cells};
+    let scratch = scratch_project();
+    let root = scratch.entry.root.clone();
+    let config = root.join("devflow.toml");
+    let mut text = std::fs::read_to_string(&config).unwrap();
+    text.push_str("\n[services.app]\nengine = \"sqlite\"\npath = \"db/app.sqlite3\"\n");
+    std::fs::write(&config, text).unwrap();
+    std::fs::create_dir_all(root.join("db")).unwrap();
+    std::fs::write(root.join("db/app.sqlite3"), empty_sqlite(true)).unwrap();
+    let h = open_scratch(cx, &scratch);
+    update(cx, &h, |s, cx| s.set_tab(Tab::Data, cx));
+    let wait_for = |cx: &mut TestAppContext, what: &str, done: fn(&SqliteService) -> bool| {
+        wait(cx, what, |cx| {
+            cx.read_entity(&h.state, |s, _| {
+                s.selection.current().is_some_and(|m| {
+                    m.services.sqlite_service("app").is_some_and(done) && s.busy().is_none()
+                })
+            })
+        })
+    };
+    wait_for(cx, "the file is read", |_| true);
+
+    // The card and the page come from the file itself: no "No data service".
+    for target in ["data-tab", "service-card-app", "sqlite-view"] {
+        assert!(exists(cx, &h, target), "{target}");
+    }
+    let (cards, service) = cx.read_entity(&h.state, |s, _| {
+        let model = s.selection.current().unwrap();
+        (
+            data_cards(model),
+            model.services.sqlite_service("app").cloned().unwrap(),
+        )
+    });
+    assert_eq!(counts_text(&cards[0]), "1 database · 0 snapshots");
+    let rows = service.databases.as_ref().unwrap();
+    let cells = database_cells(&rows[0]);
+    assert_eq!(
+        (
+            cells.workspace.as_str(),
+            cells.size.as_str(),
+            cells.mode.as_str()
+        ),
+        ("main", "4.0 kB", "WAL")
+    );
+    // Nothing is bound yet: the file is the default workspace's own.
+    assert_eq!(cells.source, "not set up");
+    assert_eq!(cells.owner, "the project's own file");
+    assert_eq!(rows[0].file, root.join("db/app.sqlite3"));
+    assert!(service.library.starts_with('3'), "{}", service.library);
+
+    // A snapshot, through the dialog and core's consistent copy.
+    open_sqlite_dialog(cx, &h, "sqlite-snapshot-create", "sqlite-snapshot-save");
+    click(cx, &h, "sqlite-snapshot-name");
+    cx.update_window(h.window.into(), |_, window, cx| {
+        window.input("baseline", cx)
+    })
+    .unwrap();
+    click(cx, &h, "sqlite-snapshot-save");
+    wait_for(cx, "the snapshot is listed", |service| {
+        service.snapshot_count() == Some(1)
+    });
+    let service = sqlite_service_of(cx, &h);
+    let snapshot = &service.snapshots.as_ref().unwrap().ready[0];
+    let cells = snapshot_cells(snapshot);
+    assert_eq!(cells.label, "baseline@v1");
+    assert_eq!(cells.size, "4.0 kB");
+    assert!(
+        cells.how.starts_with("taken by reflink") || cells.how.starts_with("taken by backup"),
+        "{}",
+        cells.how
+    );
+    assert_eq!(cells.from, "from workspace main");
+    let cards = cx.read_entity(&h.state, |s, _| data_cards(s.selection.current().unwrap()));
+    assert_eq!(counts_text(&cards[0]), "1 database · 1 snapshot");
+    cx.read_entity(&h.state, |s, _| {
+        let activity = s.activity.as_ref().expect("the job left its output");
+        assert_eq!(activity.title, "Snapshot baseline of app");
+        assert!(
+            matches!(activity.outcome, Some(Ok(_))),
+            "{:?}",
+            activity.outcome
+        );
+    });
+
+    // The default workspace's file is not offered for Reset or Drop.
+    for button in ["sqlite-db-reset", "sqlite-db-drop"] {
+        click_scrolled(cx, &h, "sqlite-view", (button, 0usize));
+        std::thread::sleep(Duration::from_millis(100));
+        cx.run_until_parked();
+        assert!(!exists(cx, &h, "sqlite-reset-dialog") && !exists(cx, &h, "confirm"));
+    }
+
+    // Reconciling a file service asks the snapshot catalog, not Docker: with
+    // nothing half-made there is nothing to say.
+    let (backend, project) = cx.read_entity(&h.state, |s, _| {
+        (
+            s.services.clone(),
+            s.selection.current().unwrap().project.clone().unwrap(),
+        )
+    });
+    assert_eq!(
+        backend.reconcile(&project, "app").unwrap(),
+        Vec::<String>::new()
+    );
+
+    // Deleting the snapshot asks first.
+    open_sqlite_dialog(cx, &h, ("sqlite-snapshot-delete", 0usize), "confirm");
+    click(cx, &h, "confirm");
+    wait_for(cx, "the snapshot is gone", |service| {
+        service.snapshot_count() == Some(0)
     });
 }

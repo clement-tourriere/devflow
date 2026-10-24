@@ -292,7 +292,15 @@ impl Orphans {
 /// A receipt that cannot be read is reported in [`Orphans::incomplete`] and no
 /// branch is called an orphan meanwhile.
 pub fn orphans(project: &Project) -> Result<Orphans> {
-    orphans_in(project, &super::catalog::Store::path_for(project.id())?)
+    let mut found = orphans_in(project, &super::catalog::Store::path_for(project.id())?)?;
+    // A removed sqlite service keeps its snapshots in the data directory.
+    for key in crate::setup::sqlite_orphans(project)? {
+        if !found.services.contains(&key) {
+            found.services.push(key);
+        }
+    }
+    found.services.sort();
+    Ok(found)
 }
 
 fn orphans_in(project: &Project, path: &std::path::Path) -> Result<Orphans> {
@@ -380,8 +388,19 @@ fn orphans_in(project: &Project, path: &std::path::Path) -> Result<Orphans> {
 /// removal: a service that was configured again meanwhile is never forgotten.
 /// A configuration that cannot be read refuses as well.
 pub fn forget(project: &Project, key: &str) -> Result<Vec<String>> {
+    // Whatever the key is, it is a key before it is anything else: it names a
+    // directory of the data directory, and a path is not a service.
     ensure!(
-        !project.config.containers().any(|(k, _, _)| k == key),
+        crate::config::valid_service_key(key),
+        "'{}' is not a service key: use a lowercase letter, then lowercase letters, digits, '_' \
+         or '-' (31 characters at most); nothing was removed",
+        key.chars()
+            .map(|c| if c.is_control() { '?' } else { c })
+            .collect::<String>()
+    );
+    ensure!(
+        !project.config.containers().any(|(k, _, _)| k == key)
+            && project.config.sqlite_services().all(|(k, _)| k != key),
         "service '{key}' is still configured in {}; remove it from the configuration first \
          (devflow never deletes the data of a configured service)",
         project.config_path.display()
@@ -389,9 +408,24 @@ pub fn forget(project: &Project, key: &str) -> Result<Vec<String>> {
     ensure_unconfigured(project, key)?;
     let path = super::catalog::Store::path_for(project.id())?;
     let engine = super::catalog::read_file(&path)?
-        .and_then(|catalog| catalog.services.get(key).map(|service| service.engine))
-        .with_context(|| format!("the catalog records no service named '{key}'"))?;
-    Service::recorded(project, key, engine)?.forget_checked(|| ensure_unconfigured(project, key))
+        .and_then(|catalog| catalog.services.get(key).map(|service| service.engine));
+    // The catalogs record what there is to forget; with neither recording
+    // the service, nothing is touched.
+    let sqlite_recorded = crate::setup::sqlite_recorded(project, key)?;
+    ensure!(
+        engine.is_some() || sqlite_recorded,
+        "the catalog records no service named '{key}'; nothing was removed"
+    );
+    let mut removed = match engine {
+        Some(engine) => Service::recorded(project, key, engine)?
+            .forget_checked(|| ensure_unconfigured(project, key))?,
+        None => Vec::new(),
+    };
+    // The snapshots of a sqlite service (files in the data directory).
+    if sqlite_recorded {
+        removed.extend(crate::setup::sqlite_forget(project, key)?);
+    }
+    Ok(removed)
 }
 
 /// The project as its files say now, which must be the same project.
@@ -416,7 +450,8 @@ fn fresh(project: &Project) -> Result<Project> {
 fn ensure_unconfigured(project: &Project, key: &str) -> Result<()> {
     let fresh = fresh(project)?;
     ensure!(
-        !fresh.config.containers().any(|(k, _, _)| k == key),
+        !fresh.config.containers().any(|(k, _, _)| k == key)
+            && fresh.config.sqlite_services().all(|(k, _)| k != key),
         "service '{key}' is configured again in {}; remove it from the configuration first \
          (devflow never deletes the data of a configured service)",
         fresh.config_path.display()
@@ -656,12 +691,12 @@ mod tests {
              [services.cache]\nengine = \"valkey\"\n",
         )
         .unwrap();
-        let project = Project {
-            root: "/tmp/shop".into(),
-            git_common_dir: "/tmp/shop/.git".into(),
-            config_path: "/tmp/shop/devflow.toml".into(),
+        let project = Project::new(
+            "/tmp/shop".into(),
+            "/tmp/shop/.git".into(),
             config,
-        };
+            "/tmp/shop/devflow.toml".into(),
+        );
         let error = forget(&project, "cache").unwrap_err().to_string();
         assert!(error.contains("still configured"), "{error}");
     }
@@ -1120,7 +1155,7 @@ pub fn stop_services(project: &Project, workspace: &worktree::Workspace) -> Chan
 /// [`stop_services`]), waiting until each answers.
 pub fn start_services(project: &Project, workspace: &worktree::Workspace) -> Changes {
     let (bound, error) = split(bound(project, workspace));
-    let services = bound
+    let services: Vec<Changed> = bound
         .into_iter()
         .map(|(key, engine, branch)| {
             let result = Service::open(project, &key).and_then(|svc| {

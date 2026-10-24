@@ -164,7 +164,21 @@ pub fn with_trust(
     cx: &mut App,
     run: impl Fn(TrustChoice, &mut Window, &mut App) + 'static,
 ) {
-    match state.read(cx).trust_prompt(target, purpose) {
+    with_trust_choosing(state, target, purpose, false, window, cx, run);
+}
+
+/// [`with_trust`] for a workspace that is about to run the default workspace's
+/// recipes by choice (`choosing`): the review is of the scope it then has.
+pub fn with_trust_choosing(
+    state: &Entity<AppState>,
+    target: &std::path::Path,
+    purpose: TrustPurpose,
+    choosing: bool,
+    window: &mut Window,
+    cx: &mut App,
+    run: impl Fn(TrustChoice, &mut Window, &mut App) + 'static,
+) {
+    match state.read(cx).trust_prompt(target, purpose, choosing) {
         None => run(TrustChoice::NotNeeded, window, cx),
         Some(prompt) => {
             let view = cx.new(|_| TrustDialog {
@@ -222,14 +236,17 @@ impl TrustDialog {
         self.working = true;
         self.error = None;
         cx.notify();
-        let (project, target, scope) = (
+        let (project, target, scope, choosing) = (
             self.prompt.project.clone(),
             self.prompt.target.clone(),
             self.prompt.scope.clone(),
+            self.prompt.choosing,
         );
         cx.spawn_in(window, async move |this, cx| {
             let approval = cx
-                .background_spawn(async move { approve_reviewed(&project, &target, &scope) })
+                .background_spawn(
+                    async move { approve_reviewed(&project, &target, &scope, choosing) },
+                )
                 .await;
             this.update_in(cx, |this, window, cx| this.approved(approval, window, cx))
                 .ok();
@@ -252,6 +269,7 @@ impl TrustDialog {
                     project: project.clone(),
                     target: self.prompt.target.clone(),
                     scope: *scope,
+                    choosing: self.prompt.choosing,
                 };
                 self.error = Some(message);
                 self.state
@@ -271,6 +289,13 @@ impl Render for TrustDialog {
         let sections = scope_sections(&self.prompt.scope);
         v_flex()
             .gap_3()
+            .children(self.prompt.choosing.then(|| {
+                div().id("trust-choosing").text_sm().child(
+                    "This workspace has no hooks or [env] of its own. You are choosing the \
+                     default workspace's: they run here, as listed below.",
+                )
+                .test_support()
+            }))
             .child(div().text_sm().child(
                 "What this project asks to run changed or was never approved. Trusting approves \
                  everything below: the hooks run with your permissions, [env] sets variables for \
@@ -607,10 +632,23 @@ fn open_remove_with(
             .as_ref()
             .and_then(|r| r.first_postgres())
             .map(|d| (d.database.clone(), d.owned && d.branch_id.is_some()));
+        // A SQLite database is a file inside the worktree: it goes with it.
+        let files = status
+            .receipt
+            .as_ref()
+            .map(|r| {
+                r.services
+                    .values()
+                    .filter(|b| b.engine.is_file() && !b.orphaned)
+                    .map(|b| b.database.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
         RemovePlan {
             path: shorten_home(&status.workspace.path),
             branch: status.workspace.branch.clone(),
             database,
+            files,
             teardown: model
                 .project
                 .as_ref()
@@ -643,6 +681,9 @@ struct RemovePlan {
     branch: Option<String>,
     /// Database name and whether this workspace created (and may drop) it.
     database: Option<(String, bool)>,
+    /// The SQLite database files (relative to the worktree) the workspace is
+    /// bound to: removed with the directory.
+    files: Vec<String>,
     teardown: Vec<String>,
 }
 
@@ -655,31 +696,43 @@ struct RemoveDialog {
 
 impl RemoveDialog {
     fn effects(&self) -> Vec<String> {
-        let mut lines = Vec::new();
-        if !self.plan.teardown.is_empty() {
-            lines.push(format!(
-                "Run {} teardown hook(s) first",
-                self.plan.teardown.len()
-            ));
-        }
-        lines.push(match &self.plan.database {
-            Some((db, true)) if !self.choice.keep_data => {
-                format!("Drop database branch {db} (created by this workspace)")
-            }
-            Some((db, true)) => format!("Keep database branch {db}"),
-            Some((db, false)) => {
-                format!("Keep database {db} (attached, not created by this workspace)")
-            }
-            None => "No database is attached".into(),
-        });
-        lines.push(format!("Delete the worktree directory {}", self.plan.path));
-        lines.push(match (&self.plan.branch, self.choice.delete_branch) {
-            (Some(b), true) => format!("Delete Git branch {}", shown(b)),
-            (Some(b), false) => format!("Keep Git branch {}", shown(b)),
-            (None, _) => "The worktree has no branch".into(),
-        });
-        lines
+        remove_effects(&self.plan, &self.choice)
     }
+}
+
+/// What removing a workspace does, line by line, for the confirmation.
+fn remove_effects(plan: &RemovePlan, choice: &RemoveChoice) -> Vec<String> {
+    let mut lines = Vec::new();
+    if !plan.teardown.is_empty() {
+        lines.push(format!(
+            "Run {} teardown hook(s) first",
+            plan.teardown.len()
+        ));
+    }
+    lines.push(match &plan.database {
+        Some((db, true)) if !choice.keep_data => {
+            format!("Drop database branch {db} (created by this workspace)")
+        }
+        Some((db, true)) => format!("Keep database branch {db}"),
+        Some((db, false)) => {
+            format!("Keep database {db} (attached, not created by this workspace)")
+        }
+        None if !plan.files.is_empty() => "No PostgreSQL database is attached".into(),
+        None => "No database is attached".into(),
+    });
+    for file in &plan.files {
+        lines.push(format!(
+            "Delete the SQLite database {} with the worktree directory (snapshots of it are kept)",
+            shown(file)
+        ));
+    }
+    lines.push(format!("Delete the worktree directory {}", plan.path));
+    lines.push(match (&plan.branch, choice.delete_branch) {
+        (Some(b), true) => format!("Delete Git branch {}", shown(b)),
+        (Some(b), false) => format!("Keep Git branch {}", shown(b)),
+        (None, _) => "The worktree has no branch".into(),
+    });
+    lines
 }
 
 impl Render for RemoveDialog {
@@ -781,8 +834,45 @@ impl Render for ConfirmDialog {
 
 #[cfg(test)]
 mod tests {
-    use super::{Scope, scope_sections};
+    use super::{RemovePlan, Scope, remove_effects, scope_sections};
+    use crate::ops::RemoveChoice;
     use devflow_core::Config;
+
+    fn plan(database: Option<(&str, bool)>, files: &[&str]) -> RemovePlan {
+        RemovePlan {
+            path: "~/shop.worktrees/feature".into(),
+            branch: Some("feature".into()),
+            database: database.map(|(name, owned)| (name.to_string(), owned)),
+            files: files.iter().map(|f| f.to_string()).collect(),
+            teardown: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn removing_a_workspace_says_a_sqlite_file_goes_with_its_directory() {
+        let choice = RemoveChoice::default();
+        let lines = remove_effects(&plan(None, &["db/app.sqlite3"]), &choice);
+        assert_eq!(lines[0], "No PostgreSQL database is attached");
+        assert_eq!(
+            lines[1],
+            "Delete the SQLite database db/app.sqlite3 with the worktree directory (snapshots of it are kept)"
+        );
+        assert_eq!(
+            lines[2],
+            "Delete the worktree directory ~/shop.worktrees/feature"
+        );
+        // Without a file the line is what it always was.
+        let lines = remove_effects(&plan(None, &[]), &choice);
+        assert_eq!(lines[0], "No database is attached");
+        assert_eq!(lines.len(), 3);
+        // A PostgreSQL branch next to a file: both are said.
+        let lines = remove_effects(&plan(Some(("df_feature", true)), &["a.db"]), &choice);
+        assert_eq!(
+            lines[0],
+            "Drop database branch df_feature (created by this workspace)"
+        );
+        assert!(lines[1].starts_with("Delete the SQLite database a.db"));
+    }
 
     const HEAD: &str =
         "[project]\nname = \"shop\"\nid = \"0b3c9d2e-1111-4222-8333-444455556666\"\n";

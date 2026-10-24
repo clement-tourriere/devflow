@@ -188,7 +188,7 @@ fn copy_one(source_root: &Path, dest_root: &Path, entry: &str) -> Result<EntryRe
 /// that a concurrent writer to `to` could lose a file or an empty directory
 /// to. (Platforms other than macOS and Linux have only the check and the
 /// rename, which is not atomic.)
-fn rename_noreplace(from: &Path, to: &Path) -> io::Result<()> {
+pub(crate) fn rename_noreplace(from: &Path, to: &Path) -> io::Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::ffi::OsStrExt;
@@ -275,7 +275,7 @@ fn install_without_flag(from: &Path, to: &Path) -> io::Result<()> {
 }
 
 /// Create `dir` (inside `root`) without following symlinks out of `root`.
-fn create_dirs_inside(root: &Path, dir: &Path) -> Result<()> {
+pub(crate) fn create_dirs_inside(root: &Path, dir: &Path) -> Result<()> {
     let relative = dir
         .strip_prefix(root)
         .context("path is outside the worktree")?;

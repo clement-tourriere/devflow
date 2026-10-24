@@ -39,7 +39,7 @@ fn label(text: &'static str) -> Div {
 /// Is the project `target` names the open one? A dialog is opened for a
 /// project, and a palette entry or a stale button may name another: say so
 /// instead of drawing that project's workspaces under this one's name.
-fn project_is_open(
+pub(super) fn project_is_open(
     state: &Entity<AppState>,
     target: &ServiceTarget,
     window: &mut Window,
@@ -54,7 +54,7 @@ fn project_is_open(
     }
 }
 
-fn selected(select: &Entity<SelectState<Vec<SharedString>>>, cx: &App) -> Option<usize> {
+pub(super) fn selected(select: &Entity<SelectState<Vec<SharedString>>>, cx: &App) -> Option<usize> {
     select.read(cx).selected_index(cx).map(|ix| ix.row)
 }
 

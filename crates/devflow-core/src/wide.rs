@@ -85,12 +85,19 @@ pub struct Wide {
     pub ahead_behind: Option<AheadBehind>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub merged: Option<Merged>,
-    /// When the workspace was last entered (`devflow switch`, the app).
+    /// When the workspace was last used: entered (`devflow switch`, the app) or
+    /// ran a command (`devflow exec`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_active_at: Option<chrono::DateTime<chrono::Utc>>,
     /// The workspace's own port (`DEVFLOW_PORT`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub app_port: Option<u16>,
+    /// When it was suspended (`devflow suspend`); cleared by entering it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub suspended_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Kept out of `suspend --idle`.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub pinned: bool,
     pub services: Vec<container_services::View>,
     /// Why the containers are not known (the workspace's record cannot be read).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -166,10 +173,15 @@ pub fn list_with(project: &Project, pitchfork: Option<&Pitchfork>) -> Result<Vec
                 dirty: worktree::is_dirty(workspace).ok(),
                 ahead_behind,
                 merged,
-                last_active_at: status.receipt.as_ref().and_then(|r| r.last_active_at),
+                last_active_at: status
+                    .receipt
+                    .as_ref()
+                    .and_then(|r| crate::suspend::last_used(workspace, r)),
                 app_port: status.receipt.as_ref().and_then(|r| r.app_port),
                 services: services.services,
                 services_error: services.error,
+                suspended_at: status.receipt.as_ref().and_then(|r| r.suspended_at),
+                pinned: status.receipt.as_ref().is_some_and(|r| r.pinned),
                 daemons,
                 daemons_unobserved,
             };

@@ -1,6 +1,7 @@
+#:schema https://raw.githubusercontent.com/clement-tourriere/devflow/main/docs/devflow.schema.json
 # devflow.toml for a project that uses an existing PostgreSQL 18 server, for
 # example an always-on data host shared by laptops and sandboxes.
-# See docs/REMOTE.md for the server setup.
+# See docs/guide/remote-data-hosts.md for the server setup.
 
 [project]
 name = "shop"

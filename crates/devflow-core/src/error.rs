@@ -62,6 +62,10 @@ pub enum BusyWith {
     /// A start, stop, restart, removal or instance replacement of the
     /// workspace's pitchfork daemons: the process lock.
     Processes,
+    /// A setup that is still creating the workspace's data, a removal or a
+    /// clean-up of it: the instance lock, which lives beside the workspace's
+    /// record and not in the worktree's Git directory.
+    Operation,
 }
 
 /// Another devflow operation holds this workspace's lock.
@@ -88,6 +92,15 @@ impl Busy {
             with: BusyWith::Processes,
         }
     }
+
+    /// Another operation on the workspace's data (the instance lock) is in the
+    /// way.
+    pub fn operation(workspace: &str) -> Self {
+        Busy {
+            workspace: workspace.to_string(),
+            with: BusyWith::Operation,
+        }
+    }
 }
 
 impl std::fmt::Display for Busy {
@@ -102,6 +115,12 @@ impl std::fmt::Display for Busy {
                 f,
                 "another devflow operation is starting, stopping or replacing the daemons of \
                  '{}'; wait for it to finish",
+                self.workspace
+            ),
+            BusyWith::Operation => write!(
+                f,
+                "another devflow operation (a setup that is still creating its data, a \
+                 removal or a clean-up) is working on '{}'; wait for it to finish",
                 self.workspace
             ),
         }
@@ -343,3 +362,22 @@ impl std::fmt::Display for OwnershipUnknown {
 }
 
 impl std::error::Error for OwnershipUnknown {}
+
+/// A port `devflow focus` should listen on is already in use by something
+/// else. Nothing was changed.
+#[derive(Debug, Clone)]
+pub struct PortInUse {
+    pub port: u16,
+}
+
+impl std::fmt::Display for PortInUse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "port {} on 127.0.0.1 is already in use, so focus cannot listen on it",
+            self.port
+        )
+    }
+}
+
+impl std::error::Error for PortInUse {}

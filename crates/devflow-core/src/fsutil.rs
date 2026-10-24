@@ -27,7 +27,24 @@ pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
 /// validated the file earlier and must not overwrite a save that landed since
 /// uses [`replace_if_unchanged`].
 pub(crate) fn write_atomic(path: &Path, content: &[u8], private: bool) -> Result<()> {
-    let tmp = stage(path, content, private)?;
+    write_staged(path, content, private, true)
+}
+
+/// [`write_atomic`] into a directory that must already be there: a missing
+/// directory (or ancestor) is an error and is never created. For a writer whose
+/// directory is somebody else's to remove (a worktree's administrative
+/// directory, which Git deletes with the worktree): creating the missing path
+/// would bring that directory back and report success.
+pub(crate) fn write_atomic_in_existing_dir(
+    path: &Path,
+    content: &[u8],
+    private: bool,
+) -> Result<()> {
+    write_staged(path, content, private, false)
+}
+
+fn write_staged(path: &Path, content: &[u8], private: bool, create_parent: bool) -> Result<()> {
+    let tmp = stage(path, content, private, create_parent)?;
     let result =
         std::fs::rename(&tmp, path).with_context(|| format!("cannot write {}", path.display()));
     if result.is_err() {
@@ -39,10 +56,12 @@ pub(crate) fn write_atomic(path: &Path, content: &[u8], private: bool) -> Result
 /// Create the sibling temporary file for `path`, holding `content`, synced and
 /// with the mode [`write_atomic`] documents. Returns its path; the file is
 /// removed again when staging fails.
-fn stage(path: &Path, content: &[u8], private: bool) -> Result<PathBuf> {
+fn stage(path: &Path, content: &[u8], private: bool, create_parent: bool) -> Result<PathBuf> {
     let parent = parent_of(path);
-    std::fs::create_dir_all(parent)
-        .with_context(|| format!("cannot create {}", parent.display()))?;
+    if create_parent {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("cannot create {}", parent.display()))?;
+    }
     let name = path
         .file_name()
         .context("path has no file name")?
@@ -272,7 +291,7 @@ pub(crate) fn replace_if_unchanged_with(
             path.display()
         )));
     }
-    let tmp = stage(path, content, private)?;
+    let tmp = stage(path, content, private, true)?;
     if let Some(seam) = seams.after_staging {
         seam();
     }

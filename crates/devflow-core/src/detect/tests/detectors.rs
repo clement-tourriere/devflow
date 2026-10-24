@@ -15,7 +15,7 @@ fn package_manager_resolution() {
         files: Vec<(&'static str, &'static str)>,
         kind: PackageManager,
         berry: bool,
-        source: PackageManagerSource,
+        assumed: bool,
         command: &'static str,
     }
     let cases = [
@@ -24,7 +24,7 @@ fn package_manager_resolution() {
             files: vec![("package.json", "{}"), ("bun.lockb", "")],
             kind: PackageManager::Bun,
             berry: false,
-            source: PackageManagerSource::Lockfile,
+            assumed: false,
             command: "bun install --frozen-lockfile",
         },
         Case {
@@ -32,7 +32,7 @@ fn package_manager_resolution() {
             files: vec![("package.json", "{}"), ("pnpm-lock.yaml", "")],
             kind: PackageManager::Pnpm,
             berry: false,
-            source: PackageManagerSource::Lockfile,
+            assumed: false,
             command: "pnpm install --frozen-lockfile --prefer-offline",
         },
         Case {
@@ -43,7 +43,7 @@ fn package_manager_resolution() {
             ],
             kind: PackageManager::Yarn,
             berry: false,
-            source: PackageManagerSource::Lockfile,
+            assumed: false,
             command: "yarn install --frozen-lockfile",
         },
         Case {
@@ -55,7 +55,7 @@ fn package_manager_resolution() {
             ],
             kind: PackageManager::Yarn,
             berry: true,
-            source: PackageManagerSource::Lockfile,
+            assumed: false,
             command: "yarn install --immutable",
         },
         Case {
@@ -66,7 +66,7 @@ fn package_manager_resolution() {
             ],
             kind: PackageManager::Yarn,
             berry: true,
-            source: PackageManagerSource::Lockfile,
+            assumed: false,
             command: "yarn install --immutable",
         },
         Case {
@@ -74,7 +74,7 @@ fn package_manager_resolution() {
             files: vec![("package.json", r#"{"packageManager":"yarn@4.1.0"}"#)],
             kind: PackageManager::Yarn,
             berry: true,
-            source: PackageManagerSource::PackageManagerField,
+            assumed: false,
             command: "yarn install",
         },
         Case {
@@ -85,7 +85,7 @@ fn package_manager_resolution() {
             ],
             kind: PackageManager::Yarn,
             berry: false,
-            source: PackageManagerSource::PackageManagerField,
+            assumed: false,
             command: "yarn install",
         },
         Case {
@@ -93,7 +93,7 @@ fn package_manager_resolution() {
             files: vec![("package.json", "{}"), ("package-lock.json", "{}")],
             kind: PackageManager::Npm,
             berry: false,
-            source: PackageManagerSource::Lockfile,
+            assumed: false,
             command: "npm install --prefer-offline --no-audit --no-fund",
         },
         Case {
@@ -101,7 +101,7 @@ fn package_manager_resolution() {
             files: vec![("package.json", "{}")],
             kind: PackageManager::Npm,
             berry: false,
-            source: PackageManagerSource::Assumed,
+            assumed: true,
             command: "npm install --prefer-offline --no-audit --no-fund",
         },
         Case {
@@ -112,7 +112,7 @@ fn package_manager_resolution() {
             ],
             kind: PackageManager::Pnpm,
             berry: false,
-            source: PackageManagerSource::PackageManagerField,
+            assumed: false,
             command: "pnpm install --prefer-offline",
         },
         Case {
@@ -123,7 +123,7 @@ fn package_manager_resolution() {
             )],
             kind: PackageManager::Bun,
             berry: false,
-            source: PackageManagerSource::DevEngines,
+            assumed: false,
             command: "bun install",
         },
         Case {
@@ -134,7 +134,7 @@ fn package_manager_resolution() {
             ],
             kind: PackageManager::Pnpm,
             berry: false,
-            source: PackageManagerSource::ConfigFile,
+            assumed: false,
             command: "pnpm install --prefer-offline",
         },
         Case {
@@ -145,7 +145,7 @@ fn package_manager_resolution() {
             ],
             kind: PackageManager::Yarn,
             berry: false,
-            source: PackageManagerSource::Lockfile,
+            assumed: false,
             command: "yarn install --frozen-lockfile",
         },
     ];
@@ -154,7 +154,7 @@ fn package_manager_resolution() {
         let pm = &facts.js[0].package_manager;
         assert_eq!(pm.kind, case.kind, "{}", case.name);
         assert_eq!(pm.yarn_berry, case.berry, "{}", case.name);
-        assert_eq!(pm.source, case.source, "{}", case.name);
+        assert_eq!(pm.assumed, case.assumed, "{}", case.name);
         assert_eq!(
             facts.js_install_command(),
             Some(case.command),
@@ -206,10 +206,8 @@ fn workspaces_from_package_json_forms() {
     ]);
 
     let js = &facts.js[0];
-    assert_eq!(
-        js.workspaces.as_ref().expect("workspaces").source,
-        WorkspaceSource::PackageJson
-    );
+    assert!(js.workspaces);
+    assert!(js.evidence.contains(&"package.json:workspaces".to_string()));
     let paths: Vec<&str> = js.packages.iter().map(|p| p.path.as_str()).collect();
     assert_eq!(
         paths,
@@ -323,8 +321,9 @@ fn python_frameworks_from_requirements_and_pyproject() {
     assert!(pip.has_framework(Framework::FastApi));
     assert!(pip.has_framework(Framework::Flask));
     assert_eq!(pip.python[0].tool, PythonTool::Pip);
+    // pip's evidence is the requirements files it found.
     assert_eq!(
-        pip.python[0].requirements_files,
+        pip.python[0].evidence,
         vec!["requirements-dev.txt", "requirements.txt"]
     );
     assert_eq!(
@@ -368,7 +367,7 @@ fn jvm_elixir_go_and_rust() {
     ]);
     assert!(framework(&spring, Framework::SpringBoot).is_some());
     let boot = process(&spring, "bootRun", ProcessSource::SpringBoot).expect("bootRun");
-    assert_eq!(boot.display.as_deref(), Some("./gradlew bootRun"));
+    assert_eq!(shown(boot).as_deref(), Some("./gradlew bootRun"));
     assert!(spring.drivers.iter().any(|d| d.engine == Engine::Postgres));
 
     let maven = scan_files(&[(
@@ -378,7 +377,9 @@ fn jvm_elixir_go_and_rust() {
     assert!(maven.has_framework(Framework::SpringBoot));
     assert!(maven.has_migration_tool(MigrationTool::Flyway));
     assert_eq!(
-        process(&maven, "bootRun", ProcessSource::SpringBoot).and_then(|p| p.display.as_deref()),
+        process(&maven, "bootRun", ProcessSource::SpringBoot)
+            .and_then(shown)
+            .as_deref(),
         Some("mvn spring-boot:run")
     );
 
@@ -396,7 +397,9 @@ fn jvm_elixir_go_and_rust() {
     assert_eq!(ecto.migrations_dirs, vec!["priv/repo/migrations"]);
     assert_eq!(ecto.database, Some(Engine::Postgres));
     assert_eq!(
-        process(&phoenix, "phx.server", ProcessSource::Phoenix).and_then(|p| p.display.as_deref()),
+        process(&phoenix, "phx.server", ProcessSource::Phoenix)
+            .and_then(shown)
+            .as_deref(),
         Some("mix phx.server")
     );
     assert!(artifact(&phoenix, "deps").is_some_and(|a| a.kind == ArtifactKind::ElixirDeps));
@@ -419,11 +422,7 @@ fn jvm_elixir_go_and_rust() {
         1,
         "a module below another is not a second project"
     );
-    assert!(
-        go.drivers
-            .iter()
-            .any(|d| d.engine == Engine::Postgres && d.dependency == "github.com/lib/pq")
-    );
+    assert!(go.drivers.iter().any(|d| d.engine == Engine::Postgres));
 
     let rust = scan_files(&[
         (
@@ -450,11 +449,7 @@ fn jvm_elixir_go_and_rust() {
         migration(&rust, MigrationTool::Diesel)
             .is_some_and(|m| m.path == "crates/api" && m.database == Some(Engine::Postgres))
     );
-    assert!(
-        rust.drivers
-            .iter()
-            .any(|d| d.engine == Engine::Mysql && d.dependency == "sqlx")
-    );
+    assert!(rust.drivers.iter().any(|d| d.engine == Engine::Mysql));
 }
 
 // -- migration tools ------------------------------------------------------------------
@@ -721,7 +716,6 @@ volumes:
     let compose = facts.compose.as_ref().expect("compose");
 
     assert_eq!(compose.file, "docker-compose.yml");
-    assert_eq!(compose.project_name.as_deref(), Some("shop"));
     let names: Vec<&str> = compose.services.iter().map(|s| s.name.as_str()).collect();
     assert_eq!(
         names,
@@ -736,7 +730,6 @@ volumes:
     let b = service(&facts, "b");
     assert_eq!(b.engine, Engine::Clickhouse);
     assert_eq!(b.ports[0].host, Some(8123));
-    assert_eq!(b.ports[0].host_ip.as_deref(), Some("127.0.0.1"));
     assert_eq!((b.ports[1].host, b.ports[1].container), (None, 9000));
 
     let c = service(&facts, "c");
@@ -746,7 +739,6 @@ volumes:
         (Engine::Postgres, Some("pgvector"), Some(17))
     );
     assert_eq!(c.ports[0].host, None);
-    assert_eq!(c.ports[0].host_variable.as_deref(), Some("PGPORT"));
     assert_eq!(c.profiles, vec!["dev"]);
 
     let d = service(&facts, "d");
@@ -788,7 +780,6 @@ fn compose_file_priority_and_include_warning() {
     let compose = facts.compose.as_ref().expect("compose");
 
     assert_eq!(compose.file, "compose.yml");
-    assert_eq!(compose.files, vec!["compose.yml", "docker-compose.yaml"]);
     assert_eq!(compose.services.len(), 1);
     assert_eq!(compose.services[0].engine, Engine::Valkey);
     assert!(
@@ -803,7 +794,6 @@ fn compose_without_services_is_still_reported() {
     let facts = scan_files(&[("compose.yaml", "name: empty\n")]);
     let compose = facts.compose.as_ref().expect("compose");
     assert!(compose.services.is_empty());
-    assert_eq!(compose.project_name.as_deref(), Some("empty"));
     assert!(facts.compose_services(Engine::Postgres).is_empty());
 }
 
@@ -842,20 +832,18 @@ run = "y"
         mise.tasks,
         vec!["build", "db:migrate", "db:reset", "serve", "start"]
     );
-    assert_eq!(mise.env_files, vec![".env", "{{config_root}}/.devflow/env"]);
+    let listed: Vec<&str> = mise.env_entries.iter().map(|e| e.path.as_str()).collect();
+    assert_eq!(listed, vec![".env", "{{config_root}}/.devflow/env"]);
     assert!(facts.wiring.mise_loads_devflow_env);
-    assert!(
-        facts
-            .wiring
-            .evidence
-            .contains(&".mise.toml:env._.file".to_string())
-    );
+    assert!(mise.evidence.contains(&".mise.toml:env._.file".to_string()));
     assert_eq!(
         process(&facts, "serve", ProcessSource::MiseTask).map(|p| p.role),
         Some(ProcessRole::Serve)
     );
     assert_eq!(
-        process(&facts, "start", ProcessSource::MiseTask).and_then(|p| p.display.as_deref()),
+        process(&facts, "start", ProcessSource::MiseTask)
+            .and_then(shown)
+            .as_deref(),
         Some("mise run start")
     );
     assert!(process(&facts, "build", ProcessSource::MiseTask).is_none());
@@ -869,10 +857,9 @@ fn mise_that_does_not_load_the_devflow_env() {
     )]);
 
     assert!(!facts.wiring.mise_loads_devflow_env);
-    assert_eq!(
-        facts.toolchain.mise.as_ref().expect("mise").env_files,
-        vec![".env"]
-    );
+    let mise = facts.toolchain.mise.as_ref().expect("mise");
+    let listed: Vec<&str> = mise.env_entries.iter().map(|e| e.path.as_str()).collect();
+    assert_eq!(listed, vec![".env"]);
 }
 
 #[test]
@@ -887,24 +874,16 @@ fn version_files() {
         (".ruby-version", ""),
     ]);
 
-    let by_file = |name: &str| {
-        facts
-            .toolchain
-            .version_files
-            .iter()
-            .find(|v| v.file == name)
-            .unwrap_or_else(|| panic!("{name} missing"))
-    };
-    assert_eq!(by_file(".nvmrc").version.as_deref(), Some("lts/iron"));
+    // Only the names of the pin files: what they pin is read by nothing.
     assert_eq!(
-        by_file(".python-version").version.as_deref(),
-        Some("3.12.4")
+        facts.toolchain.version_files,
+        vec![
+            ".nvmrc",
+            ".python-version",
+            ".ruby-version",
+            "rust-toolchain.toml"
+        ]
     );
-    assert_eq!(
-        by_file("rust-toolchain.toml").version.as_deref(),
-        Some("1.96.0")
-    );
-    assert_eq!(by_file(".ruby-version").version, None);
     assert!(facts.toolchain.mise.is_none());
 }
 
@@ -930,15 +909,9 @@ fn devflow_pitchfork_and_legacy_wiring() {
     );
     assert_eq!(facts.wiring.legacy_devflow_files, vec![".devflow.yml"]);
     let pitchfork = facts.wiring.pitchfork.as_ref().expect("pitchfork");
-    let names: Vec<(&str, bool)> = pitchfork
-        .daemons
-        .iter()
-        .map(|d| (d.name.as_str(), d.mise))
-        .collect();
-    assert_eq!(names, vec![("db", false), ("web", true)]);
-    assert!(!pitchfork.all_daemons_use_mise);
+    assert_eq!(pitchfork.daemons, vec!["db", "web"]);
     assert!(!facts.wiring.mise_loads_devflow_env);
-    assert!(process(&facts, "web", ProcessSource::Pitchfork).is_some_and(|p| p.display.is_none()));
+    assert!(process(&facts, "web", ProcessSource::Pitchfork).is_some_and(|p| p.launch.is_none()));
 }
 
 // -- env files -------------------------------------------------------------------------
@@ -958,10 +931,7 @@ fn env_files_in_projects_and_their_categories() {
         ("config/.env", "NOT_SCANNED=1\n"),
     ]);
 
-    let paths: Vec<&str> = facts.env.files.iter().map(|f| f.path.as_str()).collect();
-    assert_eq!(paths, vec![".env.sample", "apps/web/.env.local"]);
-    assert_eq!(facts.env.files[0].key_count, 9);
-    assert!(facts.env.files[0].has_database_keys);
+    assert_eq!(facts.env.files, vec![".env.sample", "apps/web/.env.local"]);
     let category = |name: &str| {
         facts
             .env
@@ -970,15 +940,20 @@ fn env_files_in_projects_and_their_categories() {
             .find(|k| k.name == name)
             .map(|k| k.category)
     };
-    assert_eq!(category("S3_BUCKET"), Some(EnvCategory::ObjectStorage));
-    assert_eq!(category("MONGODB_URI"), Some(EnvCategory::Mongo));
-    assert_eq!(category("CLICKHOUSE_HOST"), Some(EnvCategory::Clickhouse));
     assert_eq!(category("PGHOST"), Some(EnvCategory::Postgres));
     assert_eq!(category("MYSQL_ROOT_PASSWORD"), Some(EnvCategory::Mysql));
-    assert_eq!(category("RABBITMQ_URL"), Some(EnvCategory::Broker));
-    assert_eq!(category("SMTP_HOST"), Some(EnvCategory::Mail));
-    assert_eq!(category("OPENSEARCH_URL"), Some(EnvCategory::Search));
     assert_eq!(category("DB_HOST"), Some(EnvCategory::Database));
+    // Names of services no proposal acts on are not reported.
+    for other in [
+        "S3_BUCKET",
+        "MONGODB_URI",
+        "CLICKHOUSE_HOST",
+        "RABBITMQ_URL",
+        "SMTP_HOST",
+        "OPENSEARCH_URL",
+    ] {
+        assert_eq!(category(other), None, "{other}");
+    }
     assert_eq!(category("SECRET"), None);
     assert_eq!(category("FOO"), None);
     let names: Vec<&str> = facts.env.keys.iter().map(|k| k.name.as_str()).collect();
@@ -991,9 +966,7 @@ fn env_files_in_projects_and_their_categories() {
 fn env_without_database_keys() {
     let facts = scan_files(&[(".env", "PORT=3000\nSECRET_KEY_BASE=x\nFEATURE_FLAG=1\n")]);
 
-    assert!(!facts.env.has_database_keys);
-    assert!(!facts.env.files[0].has_database_keys);
-    assert_eq!(facts.env.files[0].key_count, 3);
+    assert_eq!(facts.env.files, vec![".env"]);
     assert_eq!(
         facts.env.keys.len(),
         1,
@@ -1105,7 +1078,6 @@ fn facts_serialize_with_snake_case_names() {
     let value = serde_json::to_value(&facts).expect("serialize");
 
     for key in [
-        "root",
         "git",
         "toolchain",
         "js",
@@ -1123,14 +1095,10 @@ fn facts_serialize_with_snake_case_names() {
         assert!(value.get(key).is_some(), "missing top-level key {key}");
     }
     assert_eq!(value["js"][0]["package_manager"]["kind"], "bun");
-    assert_eq!(
-        value["js"][0]["package_manager"]["source"],
-        "package_manager_field"
-    );
+    assert_eq!(value["js"][0]["package_manager"]["assumed"], false);
     assert_eq!(value["frameworks"][0]["framework"], "next_js");
     assert_eq!(value["compose"]["services"][0]["engine"], "postgres");
     assert_eq!(value["env"]["keys"][0]["category"], "database_url");
-    assert_eq!(value["env"]["has_database_keys"], true);
 }
 
 #[test]

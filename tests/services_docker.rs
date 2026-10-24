@@ -3799,6 +3799,7 @@ fn a_removal_drops_the_branch_recorded_before_its_creation_and_only_this_instanc
         service: "cache".into(),
         branch_id: default.id,
         engine: Some(devflow_core::config::Engine::Valkey),
+        file: None,
     });
     crashed.save(&made.workspace.git_dir).unwrap();
     let other = setup::remove(
@@ -3834,6 +3835,7 @@ fn a_removal_drops_the_branch_recorded_before_its_creation_and_only_this_instanc
         service: "cache".into(),
         branch_id: id,
         engine: Some(devflow_core::config::Engine::Valkey),
+        file: None,
     });
     crashed.save(&again.workspace.git_dir).unwrap();
     let removed = setup::remove(
@@ -3856,6 +3858,7 @@ fn a_removal_drops_the_branch_recorded_before_its_creation_and_only_this_instanc
         service: "cache".into(),
         branch_id: Uuid::new_v4(),
         engine: Some(devflow_core::config::Engine::Valkey),
+        file: None,
     });
     recorded.save(&never.workspace.git_dir).unwrap();
     let gone = setup::remove(
@@ -3881,6 +3884,7 @@ fn a_removal_drops_the_branch_recorded_before_its_creation_and_only_this_instanc
         service: "cache".into(),
         branch_id: id,
         engine: None,
+        file: None,
     });
     crashed.save(&left.workspace.git_dir).unwrap();
     let config = std::fs::read_to_string(fx.project.root.join("devflow.toml")).unwrap();
@@ -4785,4 +4789,129 @@ fn gc_removes_the_container_and_volume_of_a_worktree_git_forgot_and_only_that_on
             .iter()
             .all(|r| r.workspace != "agent-a")
     );
+}
+
+#[test]
+#[ignore = "needs Docker, valkey/valkey:8-alpine and debian:stable-slim"]
+fn suspending_a_workspace_stops_its_containers_and_entering_it_starts_them() {
+    use devflow_core::services::workspace::Change;
+    let fx = Fixture::valkey();
+    let first = create(&fx, "feature-a", SetupOptions::default()).unwrap();
+    let url = env_url(&first.workspace.path, "REDIS_URL");
+    let (port, password) = (port_of(&url), password_of(&url));
+    Redis::auth(port, &password)
+        .unwrap()
+        .cmd(&["SET", "kept", "yes"])
+        .unwrap();
+
+    // Suspended: the workspace's own container is stopped and the receipt says so.
+    let suspension = devflow_core::suspend::suspend(&fx.project, &first.workspace, None);
+    assert!(suspension.suspended, "{suspension:?}");
+    assert_eq!(
+        suspension.services.as_ref().unwrap().services[0].change,
+        Change::Stopped
+    );
+    assert!(TcpStream::connect(("127.0.0.1", port)).is_err());
+    let receipt = setup::receipt(&fx.project, &first.workspace)
+        .unwrap()
+        .unwrap();
+    assert!(receipt.suspended_at.is_some());
+
+    // Entering the workspace resumes it: same port, same data, mark cleared.
+    let resumed = setup::activate(
+        &fx.project,
+        &first.workspace,
+        SetupOptions::default(),
+        &mut NoProgress,
+    )
+    .unwrap();
+    assert!(resumed.resumed_from.is_some());
+    assert_eq!(resumed.services_state[0].state, ServiceRun::Started);
+    assert_eq!(
+        Redis::auth(port, &password).unwrap().get("kept").as_deref(),
+        Some("yes")
+    );
+    assert!(
+        setup::receipt(&fx.project, &first.workspace)
+            .unwrap()
+            .unwrap()
+            .suspended_at
+            .is_none()
+    );
+
+    // Starting the containers by hand ends the rest too.
+    assert!(devflow_core::suspend::suspend(&fx.project, &first.workspace, None).suspended);
+    let started = devflow_core::services::workspace::start_services(&fx.project, &first.workspace);
+    assert!(started.ok(), "{started:?}");
+    assert!(
+        setup::receipt(&fx.project, &first.workspace)
+            .unwrap()
+            .unwrap()
+            .suspended_at
+            .is_none()
+    );
+
+    // So does starting one service by itself (`service cache up WS`, the
+    // app's per-service Start): the shared start path knows the workspace that
+    // owns the branch.
+    assert!(devflow_core::suspend::suspend(&fx.project, &first.workspace, None).suspended);
+    let id = first.receipt.services["cache"].branch_id.unwrap();
+    fx.service().up(id).unwrap();
+    assert!(
+        setup::receipt(&fx.project, &first.workspace)
+            .unwrap()
+            .unwrap()
+            .suspended_at
+            .is_none()
+    );
+}
+
+#[test]
+#[ignore = "needs Docker, valkey/valkey:8-alpine and debian:stable-slim"]
+fn a_snapshot_asked_for_the_data_that_was_shown_is_refused_once_a_reset_replaced_it() {
+    use devflow_core::services::catalog::{SourceExpect, SourceRef};
+    let fx = Fixture::valkey();
+    let made = create(&fx, "agent-r", SetupOptions::default()).unwrap();
+    let svc = fx.service();
+    let branch = made.receipt.services["cache"].branch_id.unwrap();
+    let shown = svc.branch(branch).unwrap().unwrap();
+    let expect = SourceExpect {
+        owner: shown.owner,
+        generation: Some(shown.generation),
+        volume: Some(shown.volume.clone()),
+    };
+    assert!(expect.owner.is_some());
+
+    // Somebody resets the branch (same id, same owner, another volume).
+    let reset = svc.reset_branch(branch, SourceRef::Empty).unwrap();
+    assert_ne!(reset.volume, shown.volume);
+    assert!(reset.generation > shown.generation);
+
+    // What was shown is not what is there: nothing is captured, no snapshot is
+    // made, and the branch is as the reset left it.
+    let error = svc
+        .snapshot_branch_expecting(branch, "gc-shown", Some(&expect))
+        .unwrap_err();
+    assert!(
+        format!("{error:#}").contains("was reset since"),
+        "{error:#}"
+    );
+    assert!(svc.find_snapshot("gc-shown", None).is_err());
+    let now = svc.branch(branch).unwrap().unwrap();
+    assert_eq!(now.volume, reset.volume);
+    assert_eq!(
+        now.state,
+        devflow_core::services::catalog::RecordState::Ready
+    );
+
+    // Asked for what is there now, it is made.
+    let expect = SourceExpect {
+        generation: Some(now.generation),
+        volume: Some(now.volume.clone()),
+        owner: now.owner,
+    };
+    let snapshot = svc
+        .snapshot_branch_expecting(branch, "gc-shown", Some(&expect))
+        .unwrap();
+    assert_eq!(snapshot.name, "gc-shown");
 }

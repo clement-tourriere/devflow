@@ -6,7 +6,9 @@ The migration has three parts: translate the configuration, move the data you wa
 
 ## From an earlier 1.0 build
 
-The top-level `[postgres]` table became a service:
+An earlier 1.0 build (a development snapshot) carries its worktrees, receipts, approvals and servers forward: the next `setup` or `switch` migrates what it finds, and nothing is provisioned or dropped while doing so. What changes for you:
+
+**Configuration.** The top-level `[postgres]` table became a service:
 
 ```toml
 # before
@@ -27,35 +29,46 @@ The keys inside are unchanged, `devflow.local.toml` overlays `[services.db]` the
 
 You do not have to edit the file: the desktop app offers **Migrate configuration…** on a project that has the old table (it shows the exact change first), and `devflow config migrate` does the same on the command line (`--dry-run` shows the change without writing it). Both rewrite `devflow.toml` and `devflow.local.toml` in place, keep comments and the table's position, and leave the server, its branches and your workspaces alone: they are identified by the project id, not by the service key. Nothing is written when a file has both `[postgres]` and a PostgreSQL service, or when `services.db` is already something else; fix that by hand and run it again.
 
-Existing worktrees need no action. The first `devflow setup` or `switch` in each migrates its receipt in place (version 1 to 2) without touching any database: the old `data` binding moves to the project's sole postgres service, and the `database` phase is now called `services`. If the configuration has no postgres service the binding is kept as `receipt.unmapped`, reported by `setup` and `devflow doctor`, and not exported until you add the service. `devflow --json` documents now carry `receipt.services.<key>` where they carried `receipt.data`. A managed server started by an earlier build keeps working; its next `devflow db up` gives it a stable host port.
+Existing worktrees need no action for this. The first `devflow setup` or `switch` in each migrates its receipt in place (version 1 to 2) without touching any database: the old `data` binding moves to the project's sole postgres service, and the `database` phase is now called `services`. If the configuration has no postgres service the binding is kept as `receipt.unmapped`, reported by `setup` and `devflow doctor`, and not exported until you add the service. `devflow --json` documents now carry `receipt.services.<key>` where they carried `receipt.data`. A managed server started by an earlier build keeps working; its next `devflow db up` gives it a stable host port, and its metadata schema is upgraded in place by the next operation (an older devflow refuses a newer schema).
+
+**Approvals.** An approval made when only hooks were covered authorizes nothing now (`devflow trust` reports it as an older format): run `devflow trust` again and read what it covers. Approvals are kept per digest, so worktrees whose hooks or pitchfork files differ no longer revoke each other's.
+
+**Recipes per workspace.** `[hooks]`, `[env]` and `[worktree] copy` are read from each worktree's own `devflow.toml`. A workspace set up before that, whose branch has no valid `devflow.toml`, keeps the default workspace's recipes as if you had chosen them (recorded in its receipt and reported once); a branch that has its own file runs it from then on. A worktree made before the main checkout's `devflow.toml` is committed needs that file committed, or the choice of the default workspace's recipes (`devflow setup --use-default-recipes`).
+
+**`.devflow/env`.** A file written without the list of owned names is refused by `devflow exec` and written again by the next `setup` or `switch`.
+
+**Scripts.** In `devflow --json doctor`, a check's `hint` is plain words and the command is `remedies[].command`; `devflow --json pitchfork status` has `unsupported` where it had `missing_features`; `receipt.services.<key>` replaces `receipt.data`. A plan saved by `devflow --json init --plan` with an earlier build is stale: plan again. pitchfork older than 2.20.0 and mise older than 2026.4.18 are refused where devflow relies on them (`devflow doctor` names the release it found).
 
 ## What was removed
 
 | 0.x | 1.0 |
 | --- | --- |
 | Native process supervisor (`devflow process`, `processes:`), controller daemon (`devflow daemon`) | [pitchfork](https://pitchfork.jdx.dev) daemons in `pitchfork.toml` |
-| HTTPS proxy (`devflow proxy`, `devflow-proxy`, local CA) | pitchfork's proxy (`<daemon>.<worktree>.<project>.localhost`) |
+| HTTPS proxy (`devflow proxy`, `devflow-proxy`, local CA) | pitchfork's proxy (`<daemon>.<namespace>.localhost`, the namespace being the `df-<project8>-<instance8>` devflow assigns the workspace) |
 | Terminal dashboard (`devflow tui`) | `devflow-gui` (`devflow gui`) and the CLI |
 | Tauri + React desktop app | `devflow-gui`, a new GPUI app. Its state is not migrated; add your projects again. |
 | Jujutsu workspaces | Not supported. Git only. |
-| MySQL, ClickHouse, Redis, RustFS and generic Docker services | Run them with `compose.yaml`, pitchfork daemons or mise. devflow no longer branches them. |
+| Redis and MySQL services | `[services.<key>]` with `engine = "valkey"`, `"redis"` or `"mysql"` (preview): a container per workspace, cloned copy-on-write ([Valkey and Redis](guide/valkey-redis.md), [MySQL](guide/mysql.md)). Their 0.x data is not migrated: dump and restore, or start from a snapshot |
+| ClickHouse, RustFS and generic Docker services | Run them with `compose.yaml`, pitchfork daemons or mise. devflow no longer branches them. |
 | Local per-workspace and shared PostgreSQL engines, ZFS/APFS/reflink data-directory drivers | One PostgreSQL 18 server per project; each workspace is a database cloned with `file_copy_method = clone` |
 | Cloud providers (Neon, DBLab, Xata) and plugin providers | An external PostgreSQL 18 server (`mode = "external"`) |
 | Baselines (`baseline prepare`, `--data-from baseline:NAME@vN`) | Snapshots: `devflow db snapshot create NAME`, `--data-from snapshot:NAME[@vN]` |
 | Seeding (`service seed` from a URL, dump or S3) | `pg_restore` or `psql` into the workspace database, then a snapshot |
 | Hook phases, actions, recipes and MiniJinja templates | `setup`, `switch` and `teardown` shell commands that read environment variables |
 | Hook approvals (`devflow hook approvals`, `DEVFLOW_APPROVE_HOOKS`) | `devflow trust`, `DEVFLOW_TRUST_HOOKS=1` |
-| `devflow exec`, `switch -x`, operation journal (`devflow operation`), retention, pins and expiry, artifact caches | Run commands in the worktree directly. `devflow setup` and `devflow db reconcile` resume interrupted work. `worktree.copy` clones explicit paths; mbx shares Rust build caches. |
+| `devflow exec`, `switch -x` | `devflow exec -- CMD` is a different command in 1.0: it runs `CMD` with the workspace's `.devflow/env` applied last, so the right database wins over whatever mise or the shell set. `switch -x` is gone: run the command with `devflow exec` |
+| Operation journal (`devflow operation`), retention, pins and expiry, artifact caches | `devflow setup` and `devflow db reconcile` resume interrupted work. `worktree.copy` clones explicit paths; mbx shares Rust build caches. (1.0's `devflow pin` is unrelated: it keeps a workspace out of `suspend --idle`.) |
 | `devflow connection`, `status`, `link`, `worktree-setup` | `devflow db url`, `devflow list`, `devflow setup` |
-| `agent skill`, `agent context`, `agent docs`, `capabilities`, `plugin`, `gc`, `config` | `--json` on every command; see [AGENTS.md](../AGENTS.md) |
+| `agent skill`, `agent context`, `agent docs`, `capabilities`, `plugin` | `--json` on every command; see [AGENTS.md](../AGENTS.md) and the [reference](agents-reference.md) |
+| `gc`, `config` | Different commands in 1.0: `devflow gc` finds workspaces that Git or an agent host removed and what they still own; `devflow config` prints the JSON Schema and migrates an earlier build's `[postgres]` table. Neither touches 0.x resources |
 | YAML configuration, `.env.local` written by hook actions | `devflow.toml`; generated `.devflow/env` |
 
 Commands and flags that changed:
 
 | 0.x | 1.0 |
 | --- | --- |
-| `switch` with no argument (picker), `--template`, `--dry-run` | Removed. Name the workspace: `devflow switch NAME`; `devflow list` shows them. |
-| `switch --from`/`-b`/`--base` | `switch -c NAME --from WS`. The default source is the default workspace, not the current one. |
+| `switch --template`, `--dry-run` | Removed. `devflow switch` with no name opens a picker at a terminal; scripts name the workspace (`devflow list` shows them). |
+| `switch --from`/`-b`/`--base` | `switch -c NAME --from WS`. The default source is the default workspace, not the current one. 1.0 has a `--base REF` of its own: where a new branch starts (a branch, tag, commit or remote branch), with `--data-from` for the data source. |
 | `switch --no-services`, `--no-processes`, `--no-verify` | `--no-db`, `--no-hooks`. A skip is recorded: a later `devflow setup` does not run the skipped phase. |
 | `remove --keep-services` | `remove --keep-data` |
 | `remove --force` | Different meaning. 0.x skipped the confirmation; 1.0 overrides protections (dirty or locked worktree, failing or untrusted teardown hooks, an unmerged branch with `--delete-branch`). A person at a terminal gets a prompt instead of needing the flag. |
@@ -65,7 +78,7 @@ Commands and flags that changed:
 | `install-hooks`, `uninstall-hooks`, `git-hook` | `devflow hook install`, `devflow hook uninstall`. The 1.0 hook runs `devflow setup --if-new`; see part 3 for removing the 0.x hooks. |
 | `sync-ai-configs` | Removed, with no replacement. |
 | `cleanup` | `devflow db branch list` and `db branch delete` for stray database branches; `devflow db reconcile` for interrupted operations. |
-| `project` | `devflow list --all` lists the registered projects. |
+| `project` | `devflow list --all` lists the registered projects; `devflow project forget` and `relocate` mend the list. |
 | `plan` | Removed. There is no dry run; `devflow trust` shows what the project runs (hook commands, `[env]` recipes, pitchfork processes) without running anything. |
 | `config-validate` | `devflow doctor`; every command reports configuration errors. |
 

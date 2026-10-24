@@ -241,8 +241,10 @@ impl Service {
     /// still has it (removing a service never deletes its data, so its
     /// branches can still be listed and dropped).
     pub fn recorded(project: &Project, key: &str, engine: Engine) -> Result<Service> {
+        // The services are the main checkout's, whichever workspace the project
+        // was resolved for.
         let section = project
-            .config
+            .main_config()
             .containers()
             .find(|(k, _, _)| *k == key)
             .map(|(_, _, section)| section.clone())

@@ -8,6 +8,11 @@
 //! id that owns it. Nothing is engine-specific here: an engine is a word
 //! (`Engine::as_str`), so a new one in core renders without a change.
 //!
+//! A `sqlite` service is the exception that proves the rule: it is not a
+//! container, so it has no branches, no Docker engine and no endpoint. Its
+//! model ([`SqliteService`]) is a file per workspace and a list of snapshots,
+//! read from local files alone on every refresh (no Docker, no server).
+//!
 //! The backend is a trait so the app can be tested without Docker:
 //! [`CoreServices`] is the one that calls `devflow_core::services`; tests give
 //! the state another. Every method is a small function over one core call.
@@ -18,7 +23,7 @@ use crate::{
 use anyhow::{Context as _, Result};
 use chrono::{DateTime, Utc};
 use devflow_core::{
-    config::{CowCapability, Engine},
+    config::{CowCapability, Engine, SqliteSection},
     db::DataSource,
     project::Project,
     redact,
@@ -27,9 +32,11 @@ use devflow_core::{
         catalog::{self, CloneMethod, RecordState, SourceRef},
         probe, workspace,
     },
-    setup::{self, BranchExpect, ResetSource, WorkspaceStatus},
+    setup::{self, BranchExpect, ResetSource, SqliteDatabase, WorkspaceStatus},
+    sqlite::{self, How},
     worktree::Workspace,
 };
+use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
 // ---- the models -------------------------------------------------------------------
@@ -45,6 +52,9 @@ pub struct ServicesModel {
     /// Each configured service in detail, read on the Data tab (it asks
     /// Docker). `None` before the first such read.
     pub details: Option<Vec<ServiceDetail>>,
+    /// The `sqlite` services: files, not containers, so they are read on
+    /// every refresh with the counts (local files only, no Docker).
+    pub sqlite: Vec<SqliteService>,
     /// Why the catalog could not be read.
     pub error: Option<String>,
 }
@@ -52,6 +62,11 @@ pub struct ServicesModel {
 impl ServicesModel {
     pub fn detail(&self, key: &str) -> Option<&ServiceDetail> {
         self.details.as_ref()?.iter().find(|d| d.key == key)
+    }
+
+    /// The `sqlite` service `key`, if the configuration has one.
+    pub fn sqlite_service(&self, key: &str) -> Option<&SqliteService> {
+        self.sqlite.iter().find(|s| s.key == key)
     }
 }
 
@@ -386,6 +401,381 @@ impl SnapshotRow {
     }
 }
 
+// ---- sqlite services: a file in each workspace ----------------------------------------
+
+/// A `sqlite` service as the Data tab shows it: where its file is in a
+/// workspace, the library that opens it, the snapshots, and the database of
+/// every workspace. A part core could not read is an error, never an empty
+/// list: "unknown" is not "none".
+#[derive(Clone, Debug, PartialEq)]
+pub struct SqliteService {
+    /// The service key (the identity of every request).
+    pub key: String,
+    /// The configured path of the file, relative to a worktree.
+    pub path: String,
+    /// The version of the SQLite library devflow links (it is bundled).
+    pub library: String,
+    /// The configuration refuses a copy that does not share blocks.
+    pub require_cow: bool,
+    /// One per workspace whose checkout is present, or why they could not be
+    /// listed.
+    pub databases: Result<Vec<SqliteDb>, String>,
+    /// The snapshots, or why the catalog could not be read.
+    pub snapshots: Result<SqliteSnapshots, String>,
+}
+
+impl SqliteService {
+    /// Databases that exist now; `None` when they could not be listed.
+    pub fn database_count(&self) -> Option<usize> {
+        self.databases
+            .as_ref()
+            .ok()
+            .map(|all| all.iter().filter(|d| d.exists).count())
+    }
+
+    /// Snapshots that are ready; `None` when the catalog could not be read.
+    pub fn snapshot_count(&self) -> Option<usize> {
+        self.snapshots.as_ref().ok().map(|s| s.ready.len())
+    }
+
+    /// Snapshot operations that did not end (zero while unknown: the card
+    /// says "unavailable" for the count itself).
+    pub fn unfinished(&self) -> usize {
+        self.snapshots.as_ref().map_or(0, |s| s.unfinished)
+    }
+
+    /// Ready snapshots whose file is gone or changed.
+    pub fn damaged(&self) -> usize {
+        self.snapshots.as_ref().map_or(0, |s| s.damaged)
+    }
+
+    /// The database of the workspace checked out at `checkout`.
+    pub fn database_at(&self, checkout: &Path) -> Option<&SqliteDb> {
+        self.databases
+            .as_ref()
+            .ok()?
+            .iter()
+            .find(|d| d.checkout == checkout)
+    }
+}
+
+/// The ready snapshots of a `sqlite` service and what is wrong with the
+/// catalog.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SqliteSnapshots {
+    pub ready: Vec<SqliteSnapshotRow>,
+    /// Snapshots being taken or removed, or whose making was abandoned.
+    pub unfinished: usize,
+    /// Ready snapshots whose file is gone or has another size than recorded.
+    pub damaged: usize,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct SqliteSnapshotRow {
+    pub id: Uuid,
+    /// As recorded: the identity of requests, drawn only through `label`.
+    pub name: RawName,
+    pub version: u32,
+    pub bytes: Option<u64>,
+    /// `reflink` (the quiesced file was cloned) or `backup` (SQLite's backup
+    /// API wrote a new file); `None` when core does not say.
+    pub how: Option<String>,
+    /// What it was taken from (`workspace:NAME`), masked.
+    pub source: String,
+    pub created: String,
+    /// The file is gone or is not the one that was recorded.
+    pub damaged: bool,
+}
+
+impl SqliteSnapshotRow {
+    /// `name@vN` as it is drawn, with credentials masked.
+    pub fn label(&self) -> String {
+        format!("{}@v{}", self.name.shown(), self.version)
+    }
+
+    pub fn size_text(&self) -> String {
+        self.bytes.map_or("size unknown".to_string(), sqlite_size)
+    }
+
+    /// "taken by reflink", "taken by backup".
+    pub fn how_text(&self) -> String {
+        match self.how.as_deref() {
+            Some("reflink") => "taken by reflink (blocks shared)".to_string(),
+            Some("backup") => "taken by backup (a new file)".to_string(),
+            Some(other) => format!("taken by {other}"),
+            None => "how it was taken is not recorded".to_string(),
+        }
+    }
+}
+
+/// One workspace's database file of a `sqlite` service.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SqliteDb {
+    /// The workspace's name as recorded; drawn through `RawName::shown`.
+    pub workspace: RawName,
+    /// The workspace's checkout: its identity (a name is only a label).
+    pub checkout: PathBuf,
+    /// The absolute path of the file in that checkout.
+    pub file: PathBuf,
+    pub is_default: bool,
+    /// The identity the receipt gave the database.
+    pub id: Option<Uuid>,
+    pub exists: bool,
+    pub bytes: Option<u64>,
+    /// `wal` or `rollback`, from the file's header; `None` for an empty file,
+    /// a file that is not a database, or no file.
+    pub journal_mode: Option<String>,
+    /// SQLite's files beside the database that exist now (`-wal`, `-shm`).
+    pub sidecars: Vec<String>,
+    /// What the receipt says it came from (`existing`, `empty`,
+    /// `workspace:NAME`, `snapshot:NAME@vN`), masked; `None` when the
+    /// workspace has no binding yet.
+    pub source: Option<String>,
+    /// devflow made this file for the workspace.
+    pub owned: bool,
+    /// `reflink` or `copy`; `None` when nothing was cloned.
+    pub cloned: Option<String>,
+}
+
+/// Who a database file belongs to, in words, and what that allows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FileOwner {
+    /// devflow created it for this workspace: it may reset or drop it.
+    Workspace,
+    /// The default workspace's file: the project's own, never replaced.
+    Project,
+    /// The workspace brought the file with it; devflow leaves it alone.
+    AlreadyThere,
+    /// The workspace has no binding for the service yet.
+    NotSetUp,
+}
+
+impl FileOwner {
+    pub fn of(is_default: bool, owned: bool, bound: bool) -> Self {
+        if is_default {
+            Self::Project
+        } else if !bound {
+            Self::NotSetUp
+        } else if owned {
+            Self::Workspace
+        } else {
+            Self::AlreadyThere
+        }
+    }
+
+    /// The table's cell.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Workspace => "created by this workspace",
+            Self::Project => "the project's own file",
+            Self::AlreadyThere => "was already in the workspace",
+            Self::NotSetUp => "not set up yet",
+        }
+    }
+
+    /// Why core would refuse to reset or drop it, for a tooltip; `None` when
+    /// it may. Core has the last word: this only explains the disabled button.
+    pub fn refusal(self) -> Option<&'static str> {
+        match self {
+            Self::Workspace => None,
+            Self::Project => Some(
+                "This is the project's own file, in the default workspace. devflow never replaces or removes it.",
+            ),
+            Self::AlreadyThere => Some(
+                "This file was already in the workspace, so devflow did not make it and leaves it alone.",
+            ),
+            Self::NotSetUp => {
+                Some("This workspace has no database bound yet: set the workspace up first.")
+            }
+        }
+    }
+}
+
+impl SqliteDb {
+    pub fn owner(&self) -> FileOwner {
+        FileOwner::of(self.is_default, self.owned, self.source.is_some())
+    }
+
+    pub fn size_text(&self) -> String {
+        match (self.exists, self.bytes) {
+            (false, _) => "not created yet".to_string(),
+            (true, Some(bytes)) => sqlite_size(bytes),
+            (true, None) => "size unknown".to_string(),
+        }
+    }
+
+    /// The journal mode as the table words it.
+    pub fn mode_text(&self) -> String {
+        match (self.exists, self.journal_mode.as_deref()) {
+            (false, _) => "—".to_string(),
+            (true, Some("wal")) => "WAL".to_string(),
+            (true, Some("rollback")) => "rollback journal".to_string(),
+            (true, Some(other)) => other.to_string(),
+            (true, None) => "not a database yet".to_string(),
+        }
+    }
+
+    /// Where the data came from, in words.
+    pub fn source_text(&self) -> String {
+        self.source
+            .as_deref()
+            .map_or("not set up".to_string(), sqlite_source_text)
+    }
+
+    /// How the file got its data.
+    pub fn clone_text(&self) -> String {
+        if self.source.is_none() {
+            return "—".to_string();
+        }
+        sqlite_clone_text(self.cloned.as_deref())
+    }
+}
+
+fn sqlite_size(bytes: u64) -> String {
+    crate::model::format_bytes(i64::try_from(bytes).unwrap_or(i64::MAX))
+}
+
+/// What a binding's `source` says, in words: `workspace:main` is "workspace
+/// main", `snapshot:seed@v2` is "snapshot seed@v2".
+pub fn sqlite_source_text(source: &str) -> String {
+    match source {
+        "existing" => "the file that was already there".to_string(),
+        "empty" => "nothing (an empty start)".to_string(),
+        other => other.split_once(':').map_or_else(
+            || other.to_string(),
+            |(kind, name)| format!("{kind} {name}"),
+        ),
+    }
+}
+
+/// How a database got its data: by which clone, or not cloned at all.
+pub fn sqlite_clone_text(method: Option<&str>) -> String {
+    match method {
+        Some(method) => format!("cloned by {method}"),
+        None => "nothing cloned".to_string(),
+    }
+}
+
+/// A database as the receipt, the file and the workspace list say it is.
+fn sqlite_db(database: &SqliteDatabase) -> SqliteDb {
+    SqliteDb {
+        workspace: RawName::from(database.workspace.clone()),
+        checkout: database.workspace_path.clone(),
+        file: database.path.clone(),
+        is_default: database.is_default,
+        id: database.id,
+        exists: database.file.exists,
+        bytes: database.file.bytes,
+        journal_mode: database.file.journal_mode.clone(),
+        sidecars: database.file.sidecars.clone(),
+        source: database.source.clone(),
+        owned: database.owned,
+        cloned: database.cloned.map(|m| m.to_string()),
+    }
+}
+
+fn how_word(how: How) -> &'static str {
+    match how {
+        How::Reflink => "reflink",
+        How::Backup => "backup",
+    }
+}
+
+/// The snapshots of one service, read from the catalog under the data
+/// directory (a local file; nothing is created by reading).
+fn sqlite_snapshots(project: &Project, key: &str) -> Result<SqliteSnapshots, String> {
+    let read = || -> Result<SqliteSnapshots> {
+        let store = sqlite::Store::open(project.id(), key)?;
+        let ready = store.list()?;
+        let unfinished = store.unfinished()?.len();
+        let damaged = store.damaged()?;
+        Ok(SqliteSnapshots {
+            unfinished,
+            damaged: damaged.len(),
+            ready: ready
+                .iter()
+                .map(|s| SqliteSnapshotRow {
+                    id: s.id,
+                    name: RawName::from(s.name.clone()),
+                    version: s.version,
+                    bytes: s.bytes,
+                    how: s.how.map(|h| how_word(h).to_string()),
+                    source: s.source.clone(),
+                    created: format_when(s.created_at),
+                    damaged: damaged.contains(&s.label()),
+                })
+                .collect(),
+        })
+    };
+    read().map_err(|error| format!("{error:#}"))
+}
+
+fn sqlite_service(project: &Project, key: &str, section: &SqliteSection) -> SqliteService {
+    SqliteService {
+        key: key.to_string(),
+        path: section.path.clone(),
+        library: sqlite::library_version().to_string(),
+        require_cow: section.require_cow,
+        databases: setup::sqlite_databases(project, key)
+            .map(|all| all.iter().map(sqlite_db).collect())
+            .map_err(|error| format!("{error:#}")),
+        snapshots: sqlite_snapshots(project, key),
+    }
+}
+
+/// The project's `sqlite` services, read from local files only.
+pub fn sqlite_services(project: &Project) -> Vec<SqliteService> {
+    project
+        .config
+        .sqlite_services()
+        .map(|(key, section)| sqlite_service(project, key, section))
+        .collect()
+}
+
+/// What settling a `sqlite` service's interrupted snapshots did, one sentence
+/// each (the activity log's lines).
+pub fn sqlite_reconciled_lines(report: &sqlite::Reconciled) -> Vec<String> {
+    let mut lines = Vec::new();
+    lines.extend(
+        report
+            .abandoned
+            .iter()
+            .map(|label| format!("removed the snapshot {label}, whose making was abandoned")),
+    );
+    lines.extend(
+        report
+            .removed
+            .iter()
+            .map(|label| format!("finished removing the snapshot {label}")),
+    );
+    lines.extend(report.damaged.iter().map(|label| {
+        format!(
+            "the file of snapshot {label} is gone or has changed; its data is lost, so the snapshot can only be deleted"
+        )
+    }));
+    lines
+}
+
+/// A snapshot that was taken.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SqliteSnapshotMade {
+    /// `NAME@vN`.
+    pub label: String,
+    /// `reflink` or `backup`.
+    pub how: Option<String>,
+    pub bytes: Option<u64>,
+}
+
+/// A database that was replaced.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SqliteResetDone {
+    /// What it was cloned from, as the receipt now records it.
+    pub source: String,
+    /// `reflink` or `copy`; `None` for an empty start.
+    pub method: Option<String>,
+    pub bytes: u64,
+}
+
 // ---- building them from core's reports ---------------------------------------------
 
 fn clone_word(method: Option<CloneMethod>) -> Option<String> {
@@ -701,6 +1091,45 @@ pub trait ServiceBackend: Send + Sync + 'static {
     ) -> Result<()>;
     /// Remove everything recorded for a service the configuration no longer has.
     fn forget(&self, project: &Project, key: &str) -> Result<Vec<String>>;
+    /// Take a consistent copy of the `sqlite` database of `workspace` as the
+    /// next version of snapshot `name`. With `expect`, core's check that the
+    /// workspace still holds the database the dialog showed comes first.
+    fn sqlite_snapshot(
+        &self,
+        project: &Project,
+        workspace: &Workspace,
+        key: &str,
+        name: &str,
+        expect: Option<BranchExpect>,
+    ) -> Result<SqliteSnapshotMade>;
+    /// Delete snapshot `name`@v`version` of a `sqlite` service.
+    fn sqlite_delete_snapshot(
+        &self,
+        project: &Project,
+        key: &str,
+        name: &str,
+        version: u32,
+    ) -> Result<()>;
+    /// Replace the `sqlite` database of `workspace` with a fresh copy of `to`,
+    /// or of the source it was created from. Core refuses what it must (the
+    /// default workspace's file, a file it did not make, a file another
+    /// process has open).
+    fn sqlite_reset(
+        &self,
+        project: &Project,
+        workspace: &Workspace,
+        key: &str,
+        to: Option<DataSource>,
+        expect: BranchExpect,
+    ) -> Result<SqliteResetDone>;
+    /// Remove the `sqlite` database of `workspace`; whether a file was there.
+    fn sqlite_drop(
+        &self,
+        project: &Project,
+        workspace: &Workspace,
+        key: &str,
+        expect: BranchExpect,
+    ) -> Result<bool>;
 }
 
 /// The backend over `devflow_core::services`.
@@ -710,6 +1139,8 @@ impl ServiceBackend for CoreServices {
     fn load(&self, project: &Project, workspaces: &[WorkspaceStatus], full: bool) -> ServicesModel {
         let mut model = ServicesModel::default();
         counts_and_orphans(project, &mut model);
+        // Files, not containers: always read, and never through Docker.
+        model.sqlite = sqlite_services(project);
         if full {
             let details = project
                 .config
@@ -819,6 +1250,13 @@ impl ServiceBackend for CoreServices {
     }
 
     fn reconcile(&self, project: &Project, key: &str) -> Result<Vec<String>> {
+        // A `sqlite` service has no containers: only its snapshots can be
+        // left half-made.
+        if project.config.sqlite_services().any(|(k, _)| k == key) {
+            return Ok(sqlite_reconciled_lines(&setup::sqlite_reconcile(
+                project, key,
+            )?));
+        }
         let report = Service::open(project, key)?.reconcile()?;
         let mut lines = report.actions;
         lines.extend(report.in_progress);
@@ -855,6 +1293,59 @@ impl ServiceBackend for CoreServices {
     fn forget(&self, project: &Project, key: &str) -> Result<Vec<String>> {
         workspace::forget(project, key)
     }
+
+    fn sqlite_snapshot(
+        &self,
+        project: &Project,
+        workspace: &Workspace,
+        key: &str,
+        name: &str,
+        expect: Option<BranchExpect>,
+    ) -> Result<SqliteSnapshotMade> {
+        let made = setup::sqlite_snapshot(project, workspace, key, name, expect)?;
+        Ok(SqliteSnapshotMade {
+            label: made.label(),
+            how: made.how.map(|h| how_word(h).to_string()),
+            bytes: made.bytes,
+        })
+    }
+
+    fn sqlite_delete_snapshot(
+        &self,
+        project: &Project,
+        key: &str,
+        name: &str,
+        version: u32,
+    ) -> Result<()> {
+        setup::sqlite_snapshot_delete(project, key, name, version)?;
+        Ok(())
+    }
+
+    fn sqlite_reset(
+        &self,
+        project: &Project,
+        workspace: &Workspace,
+        key: &str,
+        to: Option<DataSource>,
+        expect: BranchExpect,
+    ) -> Result<SqliteResetDone> {
+        let done = setup::sqlite_reset(project, workspace, key, to, Some(expect))?;
+        Ok(SqliteResetDone {
+            source: done.source,
+            method: done.method.map(|m| m.to_string()),
+            bytes: done.bytes,
+        })
+    }
+
+    fn sqlite_drop(
+        &self,
+        project: &Project,
+        workspace: &Workspace,
+        key: &str,
+        expect: BranchExpect,
+    ) -> Result<bool> {
+        setup::sqlite_drop(project, workspace, key, Some(expect))
+    }
 }
 
 #[cfg(test)]
@@ -887,6 +1378,7 @@ mod tests {
             busy: false,
             drift: None,
             env_file: None,
+            recipes: None,
         }
     }
 
@@ -1288,6 +1780,250 @@ mod tests {
             assert_eq!(detail.snapshots[0].name.as_str(), name);
             assert_eq!(detail.snapshots[0].id, snapshot_id);
         }
+    }
+
+    // ---- sqlite services -------------------------------------------------------------
+
+    fn sqlite_database(
+        workspace: &str,
+        is_default: bool,
+        file: sqlite::FileStatus,
+        binding: Option<(&str, bool, Option<CloneMethod>)>,
+    ) -> SqliteDatabase {
+        SqliteDatabase {
+            id: binding.map(|_| Uuid::new_v4()),
+            workspace: workspace.into(),
+            workspace_path: PathBuf::from(format!("/tmp/shop.worktrees/{workspace}")),
+            path: PathBuf::from(format!("/tmp/shop.worktrees/{workspace}/db/app.sqlite3")),
+            is_default,
+            file,
+            source: binding.map(|(source, _, _)| source.to_string()),
+            owned: binding.is_some_and(|(_, owned, _)| owned),
+            cloned: binding.and_then(|(_, _, cloned)| cloned),
+        }
+    }
+
+    fn present(bytes: u64, mode: Option<&str>) -> sqlite::FileStatus {
+        sqlite::FileStatus {
+            exists: true,
+            bytes: Some(bytes),
+            journal_mode: mode.map(str::to_string),
+            sidecars: Vec::new(),
+        }
+    }
+
+    fn absent() -> sqlite::FileStatus {
+        sqlite::FileStatus {
+            exists: false,
+            bytes: None,
+            journal_mode: None,
+            sidecars: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_database_row_says_where_its_workspace_is_and_what_its_file_is_in_words() {
+        let made = sqlite_db(&sqlite_database(
+            "feature-x",
+            false,
+            present(2 * 1024 * 1024, Some("wal")),
+            Some(("workspace:main", true, Some(CloneMethod::Reflink))),
+        ));
+        // The checkout is the identity of the workspace, whatever it is called.
+        assert_eq!(
+            made.checkout,
+            PathBuf::from("/tmp/shop.worktrees/feature-x")
+        );
+        assert_eq!(made.size_text(), "2.0 MB");
+        assert_eq!(made.mode_text(), "WAL");
+        assert_eq!(made.source_text(), "workspace main");
+        assert_eq!(made.clone_text(), "cloned by reflink");
+        assert_eq!(made.owner(), FileOwner::Workspace);
+        assert_eq!(made.owner().label(), "created by this workspace");
+        assert!(made.owner().refusal().is_none());
+
+        // The default workspace's own file: left alone, never cloned.
+        let project = sqlite_db(&sqlite_database(
+            "main",
+            true,
+            present(100, Some("rollback")),
+            Some(("existing", false, None)),
+        ));
+        assert_eq!(project.mode_text(), "rollback journal");
+        assert_eq!(project.source_text(), "the file that was already there");
+        assert_eq!(project.clone_text(), "nothing cloned");
+        assert_eq!(project.owner(), FileOwner::Project);
+        assert!(project.owner().refusal().unwrap().contains("project's own"));
+
+        // A file the workspace brought with it.
+        let brought = sqlite_db(&sqlite_database(
+            "legacy",
+            false,
+            present(100, None),
+            Some(("existing", false, None)),
+        ));
+        assert_eq!(brought.mode_text(), "not a database yet");
+        assert_eq!(brought.owner(), FileOwner::AlreadyThere);
+        assert_eq!(brought.owner().label(), "was already in the workspace");
+        assert!(brought.owner().refusal().unwrap().contains("did not make"));
+
+        // A workspace nothing is bound for yet, and a file that is not there.
+        let bare = sqlite_db(&sqlite_database("new", false, absent(), None));
+        assert_eq!(bare.size_text(), "not created yet");
+        assert_eq!(bare.mode_text(), "—");
+        assert_eq!(bare.source_text(), "not set up");
+        assert_eq!(bare.clone_text(), "—");
+        assert_eq!(bare.owner(), FileOwner::NotSetUp);
+        assert!(
+            bare.owner()
+                .refusal()
+                .unwrap()
+                .contains("set the workspace up")
+        );
+
+        // A snapshot or a workspace as a source reads as words.
+        assert_eq!(sqlite_source_text("snapshot:seed@v2"), "snapshot seed@v2");
+        assert_eq!(sqlite_source_text("empty"), "nothing (an empty start)");
+        assert_eq!(sqlite_clone_text(Some("copy")), "cloned by copy");
+    }
+
+    fn sqlite_fixture() -> SqliteService {
+        let rows = vec![
+            sqlite_db(&sqlite_database(
+                "main",
+                true,
+                present(4096, Some("wal")),
+                Some(("existing", false, None)),
+            )),
+            sqlite_db(&sqlite_database("fresh", false, absent(), None)),
+        ];
+        SqliteService {
+            key: "app".into(),
+            path: "db/app.sqlite3".into(),
+            library: "3.46.0".into(),
+            require_cow: false,
+            databases: Ok(rows),
+            snapshots: Ok(SqliteSnapshots::default()),
+        }
+    }
+
+    #[test]
+    fn counts_know_what_they_could_not_read() {
+        let mut service = sqlite_fixture();
+        // Files that exist, not workspaces listed.
+        assert_eq!(service.database_count(), Some(1));
+        assert_eq!(service.snapshot_count(), Some(0));
+        assert_eq!(
+            service
+                .database_at(Path::new("/tmp/shop.worktrees/main"))
+                .map(|d| d.is_default),
+            Some(true)
+        );
+        // A catalog that cannot be read is unknown, not none.
+        service.snapshots = Err("catalog.json: invalid".into());
+        assert_eq!(service.snapshot_count(), None);
+        assert_eq!((service.unfinished(), service.damaged()), (0, 0));
+        service.databases = Err("cannot list the worktrees".into());
+        assert_eq!(service.database_count(), None);
+        assert!(
+            service
+                .database_at(Path::new("/tmp/shop.worktrees/main"))
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn a_snapshot_is_labelled_masked_and_acted_on_by_its_recorded_name() {
+        // kingfisher:ignore
+        let name = "password=hunter2";
+        let row = SqliteSnapshotRow {
+            id: Uuid::new_v4(),
+            name: name.into(),
+            version: 3,
+            bytes: Some(8192),
+            how: Some("backup".into()),
+            source: "workspace:main".into(),
+            created: "2026-10-24 10:00".into(),
+            damaged: false,
+        };
+        assert_eq!(row.label(), "password=***@v3");
+        assert_eq!(row.name.as_str(), name, "the identity is untouched");
+        assert!(!format!("{row:?}").contains("hunter2"));
+        assert_eq!(row.how_text(), "taken by backup (a new file)");
+        assert_eq!(row.size_text(), "8.0 kB");
+        let reflinked = SqliteSnapshotRow {
+            how: Some("reflink".into()),
+            ..row.clone()
+        };
+        assert_eq!(reflinked.how_text(), "taken by reflink (blocks shared)");
+    }
+
+    #[test]
+    fn interrupted_snapshot_operations_are_reported_one_sentence_each() {
+        let lines = sqlite_reconciled_lines(&sqlite::Reconciled {
+            abandoned: vec!["seed@v2".into()],
+            removed: vec!["old@v1".into()],
+            damaged: vec!["lost@v1".into()],
+        });
+        assert_eq!(lines.len(), 3);
+        assert!(lines[0].contains("seed@v2") && lines[0].contains("abandoned"));
+        assert!(lines[1].contains("old@v1") && lines[1].contains("finished removing"));
+        assert!(lines[2].contains("lost@v1") && lines[2].contains("data is lost"));
+        assert!(sqlite_reconciled_lines(&sqlite::Reconciled::default()).is_empty());
+    }
+
+    #[test]
+    fn what_a_sqlite_model_says_about_a_credential_like_name_is_masked_once() {
+        // kingfisher:ignore
+        let odd = "password=hunter2";
+        let mut service = sqlite_fixture();
+        if let Ok(rows) = &mut service.databases {
+            rows[0].source = Some(format!("workspace:{odd}"));
+        }
+        service.snapshots = Ok(SqliteSnapshots {
+            ready: vec![SqliteSnapshotRow {
+                id: Uuid::new_v4(),
+                name: odd.into(),
+                version: 1,
+                bytes: None,
+                how: None,
+                source: format!("workspace:{odd}"),
+                created: String::new(),
+                damaged: false,
+            }],
+            unfinished: 0,
+            damaged: 0,
+        });
+        let mut other = sqlite_fixture();
+        other.key = "other".into();
+        other.databases = Err(format!("cannot read {odd}"));
+        other.snapshots = Err(format!("cannot read {odd}"));
+        let mut model = ServicesModel {
+            sqlite: vec![service, other],
+            ..ServicesModel::default()
+        };
+        redaction::services(&mut model);
+        let text = format!("{model:?}");
+        assert!(!text.contains("hunter2"), "{text}");
+        let Ok(rows) = &model.sqlite[0].databases else {
+            panic!("rows");
+        };
+        assert_eq!(rows[0].source.as_deref(), Some("workspace:password=***"));
+        // The snapshot's identity stays what core recorded.
+        let Ok(snapshots) = &model.sqlite[0].snapshots else {
+            panic!("snapshots");
+        };
+        assert_eq!(snapshots.ready[0].name.as_str(), odd);
+        assert_eq!(snapshots.ready[0].label(), "password=***@v1");
+        // A failure is kept as one, masked.
+        assert!(
+            model.sqlite[1]
+                .databases
+                .as_ref()
+                .unwrap_err()
+                .contains("password=***")
+        );
+        assert!(model.sqlite[1].snapshots.is_err());
     }
 
     #[test]

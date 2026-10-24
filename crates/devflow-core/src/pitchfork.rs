@@ -1,8 +1,9 @@
 //! The `pitchfork` CLI (https://pitchfork.jdx.dev) as devflow uses it.
 //!
 //! devflow does not supervise processes. This module finds pitchfork, checks
-//! that the installed build has the features devflow calls, and wraps the few
-//! commands it runs: `list --json`, `proxy status --json`,
+//! that the installed release is one devflow supports ([`tools::MIN_PITCHFORK`],
+//! pinned in [`crate::tools`] from the features devflow calls: no probing of
+//! `--help` texts), and wraps the few commands it runs: `list --json`, `proxy status --json`,
 //! `supervisor status --json`, and `start` and `stop` with fully qualified
 //! daemon ids (`namespace/name`). What may be started or stopped is decided one
 //! level up, in [`crate::processes`].
@@ -19,6 +20,7 @@
 //! looking at processes never starts a supervisor. Only an explicit start does,
 //! as pitchfork itself does for `pitchfork start`.
 use crate::subprocess::{self, Limits, Output};
+use crate::tools::{self, Tool, ToolProblem};
 use anyhow::{Context, Result, bail, ensure};
 use serde::Serialize;
 
@@ -31,8 +33,6 @@ use std::time::{Duration, Instant};
 const QUERY_TIMEOUT: Duration = Duration::from_secs(30);
 /// `--version` through a mise shim can be slow the first time.
 const VERSION_TIMEOUT: Duration = Duration::from_secs(15);
-/// `--help` of a subcommand.
-const HELP_TIMEOUT: Duration = Duration::from_secs(10);
 /// How long [`Pitchfork::detect_cached`] trusts a detection.
 pub const DETECTION_TTL: Duration = Duration::from_secs(10);
 /// What [`Pitchfork::detect_cached`] remembers, per executable.
@@ -45,24 +45,6 @@ pub fn forget_detections() {
         cache.clear();
     }
 }
-
-/// What devflow calls, as `(name shown, arguments of its --help, flag the help
-/// must mention)`. A missing feature is reported by name.
-const FEATURES: [(&str, &[&str], &str); 2] = [
-    ("list --json", &["list", "--help"], "--json"),
-    (
-        "proxy status --json",
-        &["proxy", "status", "--help"],
-        "--json",
-    ),
-];
-
-/// The feature that lets `start` and `stop` take `namespace/name` ids. Its help
-/// text does not say so, so it is judged on the version: daemon ids carry a
-/// namespace since pitchfork 2.0.0 (an id with a `/` is parsed as a full id by
-/// `PitchforkToml::resolve_ids_and_group`: read in the sources of 2.0.0, 2.14.0,
-/// 2.29.0 and 2.30.1, and run against 2.25.0 and 2.29.0).
-pub const QUALIFIED_IDS: &str = "start and stop by namespace/name (pitchfork 2.0 or later)";
 
 /// The commands that turn the pitchfork proxy on, in order. devflow prints them
 /// and never runs them: `proxy setup` changes system DNS and trust and uses sudo.
@@ -333,16 +315,18 @@ pub struct Detection {
     /// is on `PATH` and executable, but exits 1: not installed.
     pub installed: bool,
     pub version: Option<String>,
-    /// Features devflow calls that this build lacks, by name.
-    pub missing_features: Vec<String>,
+    /// Why a pitchfork that runs cannot be used: its release is older than
+    /// [`tools::MIN_PITCHFORK`], or its `--version` names none. Typed, with the
+    /// remedies that fix it ([`ToolProblem::remedies`]).
+    pub unsupported: Option<ToolProblem>,
     /// Why it is not installed, when something is on `PATH`.
     pub problem: Option<String>,
 }
 
 impl Detection {
-    /// Installed and with every feature devflow needs.
+    /// Installed, and a release devflow supports.
     pub fn usable(&self) -> bool {
-        self.installed && self.missing_features.is_empty()
+        self.installed && self.unsupported.is_none()
     }
 
     /// One line for people.
@@ -359,14 +343,9 @@ impl Detection {
             ),
             (Some(path), true) => {
                 let version = self.version.as_deref().unwrap_or("unknown version");
-                if self.missing_features.is_empty() {
-                    format!("pitchfork {version} at {}", path.display())
-                } else {
-                    format!(
-                        "pitchfork {version} at {} lacks {}",
-                        path.display(),
-                        self.missing_features.join(", ")
-                    )
+                match &self.unsupported {
+                    None => format!("pitchfork {version} at {}", path.display()),
+                    Some(problem) => format!("{} (at {})", problem.message(), path.display()),
                 }
             }
         }
@@ -395,7 +374,7 @@ pub fn detect() -> Detection {
             path: None,
             installed: false,
             version: None,
-            missing_features: Vec::new(),
+            unsupported: None,
             problem: None,
         },
     }
@@ -429,34 +408,20 @@ impl Pitchfork {
         &self.binary
     }
 
-    /// `pitchfork --version` and the features devflow uses.
+    /// `pitchfork --version`, judged against [`tools::MIN_PITCHFORK`]: one
+    /// question, because the pin stands for every feature devflow calls.
     pub fn detect(&self) -> Detection {
         let mut detection = self.probe();
-        if !detection.installed {
-            return detection;
-        }
-        for (name, args, flag) in FEATURES {
-            let has = self
-                .run(None, args, &[], Limits::new(HELP_TIMEOUT))
-                .is_ok_and(|out| out.ok && format!("{}{}", out.stdout, out.stderr).contains(flag));
-            if !has {
-                detection.missing_features.push(name.to_string());
-            }
-        }
-        if !detection
-            .version
-            .as_deref()
-            .is_some_and(|version| version_at_least(version, 2, 0))
-        {
-            detection.missing_features.push(QUALIFIED_IDS.to_string());
+        if detection.installed {
+            detection.unsupported =
+                tools::judge(Tool::Pitchfork, detection.version.as_deref().unwrap_or("")).err();
         }
         detection
     }
 
     /// [`Pitchfork::detect`], remembered for [`DETECTION_TTL`] per executable:
     /// what an operation that acts on pitchfork (a start, a stop, a gate shown
-    /// on every refresh) checks, without running `--help` of three subcommands
-    /// each time. [`forget_detections`] drops what is remembered.
+    /// on every refresh) checks, without running `--version` each time. [`forget_detections`] drops what is remembered.
     pub fn detect_cached(&self) -> Detection {
         let remembered = |cache: &Vec<(PathBuf, Instant, Detection)>| {
             cache
@@ -483,7 +448,7 @@ impl Pitchfork {
             path: Some(self.binary.clone()),
             installed: false,
             version: None,
-            missing_features: Vec::new(),
+            unsupported: None,
             problem: None,
         };
         match self.run(None, &["--version"], &[], Limits::new(VERSION_TIMEOUT)) {
@@ -640,22 +605,6 @@ fn qualified(id: &str) -> Result<&str> {
     Ok(id)
 }
 
-/// Whether `version` (`2.29.0`, `v2.30.1-beta.1`) is at least `major.minor`.
-/// A version that does not start with two numbers is not at least anything.
-pub(crate) fn version_at_least(version: &str, major: u64, minor: u64) -> bool {
-    let mut parts = version.trim_start_matches('v').split('.').map(|part| {
-        part.chars()
-            .take_while(char::is_ascii_digit)
-            .collect::<String>()
-            .parse::<u64>()
-            .ok()
-    });
-    match (parts.next().flatten(), parts.next().flatten()) {
-        (Some(have_major), Some(have_minor)) => (have_major, have_minor) >= (major, minor),
-        _ => false,
-    }
-}
-
 fn first_line(text: &str) -> Option<String> {
     text.lines()
         .map(str::trim)
@@ -731,6 +680,8 @@ pub fn parse_listing(text: &str) -> Result<Listing> {
                         .collect()
                 })
                 .unwrap_or_default(),
+            // `url` since pitchfork 2.26; the supported releases before it
+            // (the pin is 2.20) call the same value `proxy_url`.
             url: text("url").or_else(|| text("proxy_url")),
             error: text("error"),
             malformed,
@@ -758,6 +709,9 @@ pub fn parse_proxy(text: &str) -> Result<ProxyStatus> {
             .and_then(|p| p.as_u64())
             .and_then(|p| u16::try_from(p).ok())
     };
+    // `projects` (what routes to which daemon) is there since pitchfork 2.26;
+    // an older supported release has none, and a daemon's URL then comes from
+    // the listing alone.
     let projects = value
         .get("projects")
         .and_then(|p| p.as_array())
@@ -984,6 +938,23 @@ mod tests {
     }
 
     #[test]
+    fn the_oldest_supported_releases_are_read_too() {
+        // Before 2.26 the listing names the proxy URL `proxy_url` and the proxy
+        // status has `slugs` and no `projects`.
+        let listing = parse_list(
+            r#"[{"id":"ns/web","namespace":"ns","name":"web","pid":7,"status":"running",
+                 "proxy_url":"https://web.ns.localhost","port":[3000]}]"#,
+        )
+        .unwrap();
+        assert_eq!(listing[0].url.as_deref(), Some("https://web.ns.localhost"));
+        let proxy =
+            parse_proxy(r#"{"enabled": true, "scheme": "https", "port": 443, "slugs": []}"#)
+                .unwrap();
+        assert!(proxy.enabled && proxy.projects.is_empty());
+        assert_eq!(proxy.url_for(Path::new("/w"), "web"), None);
+    }
+
+    #[test]
     fn versions_are_read_from_the_first_numeric_word() {
         assert_eq!(
             parse_version("pitchfork 2.29.0\n").as_deref(),
@@ -1021,18 +992,5 @@ mod tests {
                 );
             }
         }
-    }
-
-    #[test]
-    fn the_version_decides_whether_namespaced_ids_exist() {
-        assert!(version_at_least("2.29.0", 2, 0));
-        assert!(version_at_least("2.0.0", 2, 0));
-        assert!(version_at_least("v2.30.1-beta.1", 2, 0));
-        assert!(version_at_least("3.0.0", 2, 0));
-        assert!(!version_at_least("1.6.0", 2, 0));
-        assert!(!version_at_least("1.99.9", 2, 0));
-        assert!(!version_at_least("2", 2, 0));
-        assert!(!version_at_least("", 2, 0));
-        assert!(!version_at_least("unknown", 2, 0));
     }
 }

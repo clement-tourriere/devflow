@@ -1,6 +1,26 @@
 # Review implementation (2026-10-24)
 
-Status: in progress. Implements the review of main `c3841964` (two GPT-6-Astra rounds). Integration branch: `t3/review-worktree-design`. Each workstream runs in its own T3 thread and worktree on a branch `review/<workstream>`, and is merged by rebase plus `--ff-only` after review.
+Status: done (2026-10-24). Implements the review of main `c3841964` (two GPT-6-Astra rounds). Integration branch: `t3/review-worktree-design`. Each workstream ran in its own T3 thread and worktree on a branch `review/<workstream>` and was merged by rebase or cherry-pick after review.
+
+## Outcome
+
+Every workstream below is implemented and merged: W1-A to W1-E, W2-A to W2-C, W3-A to W3-C and W4-A, the last split into its code half (schema, version pins, init trim) and its documentation half.
+
+- **Reviews.**
+  - GPT-6-Astra reviewed wave 1 and the first rounds of wave 2. GPT-6.1 Sol took over from there.
+  - Each workstream had at most three review rounds, then a verification pass of its last fixes.
+  - No high finding is open.
+- **Checks on the final tree.**
+  - fmt, plus clippy for core, CLI and GUI.
+  - Core and CLI tests, GUI tests, the link test and the schema drift test.
+  - All four Docker suites (PostgreSQL, workspace, Valkey/Redis, MySQL) and the pitchfork suite.
+- **Known limits, documented where they apply.**
+  - **SQLite:** a process that holds the database file open between transactions holds no lock devflow can see. SQLite does not say which inode its connection opened, so a double rename within microseconds of the open can defeat the check. A live-file copy can exist, under a private name, outside the worktree for the length of one copy before it is removed. All three are written up in ARCHITECTURE.md.
+  - **Host files without an atomic exchange:** where the platform has no exchange, the hard-link fallback keeps the check-then-rename window.
+  - **`claude-create`:** a creation that crashed before its receipt was written is refused, not resumed.
+  - **Records without an identity:** records written by pre-release builds have no directory identity and stay `unknown` until `gc --rebind`.
+  - **Focus:** a forwarder that dies abnormally leaves no `ended.json`.
+  - **mise:** hook gating needs mise 2026.4.18 or later.
 
 ## Why
 

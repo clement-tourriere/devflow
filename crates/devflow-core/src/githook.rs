@@ -228,8 +228,9 @@ pub fn spawn_background(
     use std::os::unix::fs::OpenOptionsExt;
     use std::os::unix::process::CommandExt;
     let log = background_log(git_dir);
-    let dir = log.parent().context("the log has no directory")?;
-    std::fs::create_dir_all(dir).with_context(|| format!("cannot create {}", dir.display()))?;
+    // Only below a Git directory that is there: it is never brought back for
+    // a log.
+    crate::receipt::logs_dir_in_existing(git_dir)?;
     let mut file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)

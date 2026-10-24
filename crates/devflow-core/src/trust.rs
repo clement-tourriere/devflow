@@ -8,6 +8,15 @@
 //! approve another clone of the same repository. An entry records the scope
 //! version it was made under: an approval of another version (version 1
 //! covered `[hooks]` alone) never authorizes the current scope.
+//!
+//! A project keeps **several** approved digests (up to [`MAX_APPROVALS`]):
+//! each workspace has its own scope (its branch's recipes and its own
+//! pitchfork files), and any workspace whose scope digest is in the set is
+//! trusted, so approving one workspace never revokes another's approval.
+//! Approving adds the current scope's digest (identical content is approved
+//! once), `revoke` removes it, `revoke_all` removes the project's whole set,
+//! and beyond the bound the oldest approvals are dropped, never the one being
+//! made. An earlier build's single entry is simply the first element.
 use crate::project::Project;
 pub use crate::scope::{
     EnvScope, HookScope, HooksScope, ProcessesScope, Scope, ScopeSection, Trigger, VERSION,
@@ -16,6 +25,10 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+
+/// The most approvals a project keeps: beyond it the oldest are dropped
+/// (never the one just made).
+pub const MAX_APPROVALS: usize = 20;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
@@ -67,13 +80,17 @@ pub fn scope(project: &Project) -> Scope {
 }
 
 /// The scope of the workspace at `dir` (a worktree of the project, or its
-/// main checkout): the project's configuration, which is read from the main
-/// checkout, and the pitchfork files of `dir` itself, since pitchfork runs
-/// what the directory it starts in says.
+/// main checkout): the recipes `dir` runs (its own branch's `[hooks]` and
+/// `[env]`, or the main checkout's for the main checkout and for a workspace
+/// that chose the default recipes; see [`crate::effective`]) and the pitchfork
+/// files of `dir` itself, since pitchfork runs what the directory it starts in
+/// says. A workspace whose recipes equal the main checkout's has the same
+/// digest as before recipes were per workspace.
 pub fn scope_at(project: &Project, dir: &Path) -> Scope {
+    let project = project.at(dir);
     // The namespace and label devflow generated for this workspace are not
     // part of what runs; any other value of either is.
-    let identity = crate::processes::generated_identity(project, dir);
+    let identity = crate::processes::generated_identity(&project, dir);
     Scope::build_with(&project.config, dir, identity.as_ref())
 }
 
@@ -110,8 +127,33 @@ pub fn approve(project: &Project) -> Result<()> {
     approve_in(&crate::paths::config_dir()?, project)
 }
 
-pub fn revoke(project: &Project) -> Result<bool> {
-    revoke_in(&crate::paths::config_dir()?, project)
+/// Withdraw the approval of the scope of the workspace at `dir` (its digest
+/// only: the project's other approvals stand). `false` when it was not
+/// approved.
+pub fn revoke_at(project: &Project, dir: &Path) -> Result<bool> {
+    let scope = scope_at(project, dir);
+    revoke_in(&crate::paths::config_dir()?, project, &scope.digest)
+}
+
+/// Withdraw every approval of the project (every digest, every scope
+/// version). Returns how many there were.
+pub fn revoke_all(project: &Project) -> Result<usize> {
+    revoke_all_in(&crate::paths::config_dir()?, project)
+}
+
+/// An approval on record, for display.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Approved {
+    pub digest: String,
+    /// The scope version it was made under; one that is not [`VERSION`]
+    /// authorizes nothing.
+    pub version: u32,
+    pub approved_at: DateTime<Utc>,
+}
+
+/// The project's approvals, oldest first.
+pub fn approvals(project: &Project) -> Result<Vec<Approved>> {
+    approvals_in(&crate::paths::config_dir()?, project)
 }
 
 /// Approve the content the user reviewed, as the main checkout's scope; see
@@ -137,16 +179,30 @@ fn approve_scope_in(
     dir: &Path,
     reviewed: &Scope,
 ) -> Result<()> {
-    let current = project.reload()?;
+    let mut current = project.reload()?;
     if let Some(why) = reviewed.processes.unapprovable() {
         anyhow::bail!("{why}");
+    }
+    // Read again from disk, whichever project the review used: the scope of
+    // `dir` as it is now. A review made with the default workspace's recipes
+    // chosen for `dir` (the choice is about to be recorded) is of that scope.
+    if matches!(
+        project.at(dir).recipes(),
+        crate::effective::RecipesSource::DefaultChosen { .. }
+    ) {
+        current = current.at_choosing(dir, true);
     }
     let now = scope_at(&current, dir);
     anyhow::ensure!(
         now.digest == reviewed.digest && now.version == reviewed.version,
         "what {} asks to run (hooks, [env] or pitchfork processes) changed since it was shown; \
          review it again",
-        current.config_path.display()
+        current
+            .at(dir)
+            .recipes()
+            .file()
+            .unwrap_or(&current.config_path)
+            .display()
     );
     #[cfg(test)]
     tests::after_check();
@@ -256,19 +312,27 @@ fn state_of(dir: &Path, project: &Project, scope: Scope) -> Result<TrustState> {
         return Ok(TrustState::NothingToApprove);
     }
     let file = read(dir)?;
-    let entry = file.approvals.iter().find(|e| matches(e, project));
+    let mine: Vec<&Entry> = file
+        .approvals
+        .iter()
+        .filter(|e| matches(e, project))
+        .collect();
     // A file too large to hash makes the digest blind to its content: nothing
     // is ever trusted on it.
     let bindable = scope.processes.unapprovable().is_none();
-    Ok(match entry {
-        Some(entry) if bindable && entry.version == VERSION && entry.digest == scope.digest => {
-            TrustState::Trusted
-        }
-        previous => TrustState::Untrusted {
-            digest: scope.digest,
-            previously_trusted: previous.is_some(),
-            format_changed: previous.is_some_and(|entry| entry.version != VERSION),
-        },
+    if bindable
+        && mine
+            .iter()
+            .any(|e| e.version == VERSION && e.digest == scope.digest)
+    {
+        return Ok(TrustState::Trusted);
+    }
+    Ok(TrustState::Untrusted {
+        digest: scope.digest,
+        previously_trusted: !mine.is_empty(),
+        // Every approval on record is of an earlier scope version, which
+        // covered less.
+        format_changed: !mine.is_empty() && mine.iter().all(|e| e.version != VERSION),
     })
 }
 
@@ -280,11 +344,15 @@ fn approve_in(dir: &Path, project: &Project) -> Result<()> {
     save_in(dir, project, &scope.digest, scope.version)
 }
 
-/// Store `digest` (of scope `version`) as the approval of `project`, as given.
+/// Store `digest` (of scope `version`) as an approval of `project`, as given.
+/// An approval of the same content is replaced, not repeated (it becomes the
+/// newest); approvals made under another scope version, which authorize
+/// nothing, are dropped; beyond [`MAX_APPROVALS`] the oldest go, never this one.
 fn save_in(dir: &Path, project: &Project, digest: &str, version: u32) -> Result<()> {
     with_lock(dir, || {
         let mut file = read(dir)?;
-        file.approvals.retain(|e| !matches(e, project));
+        file.approvals
+            .retain(|e| !matches(e, project) || (e.version == VERSION && e.digest != digest));
         file.approvals.push(Entry {
             project_id: project.id(),
             root: project.root.clone(),
@@ -292,21 +360,83 @@ fn save_in(dir: &Path, project: &Project, digest: &str, version: u32) -> Result<
             approved_at: Utc::now(),
             version,
         });
+        prune(&mut file, project, digest);
         write(dir, &file)
     })
 }
 
-fn revoke_in(dir: &Path, project: &Project) -> Result<bool> {
+/// Keep at most [`MAX_APPROVALS`] approvals of `project`: the oldest go first
+/// and the one for `keep` never does.
+fn prune(file: &mut File, project: &Project, keep: &str) {
+    let mine = file
+        .approvals
+        .iter()
+        .filter(|e| matches(e, project))
+        .count();
+    let mut excess = mine.saturating_sub(MAX_APPROVALS);
+    if excess == 0 {
+        return;
+    }
+    let mut order: Vec<usize> = (0..file.approvals.len())
+        .filter(|&i| matches(&file.approvals[i], project) && file.approvals[i].digest != keep)
+        .collect();
+    order.sort_by_key(|&i| (file.approvals[i].approved_at, i));
+    let mut drop = Vec::new();
+    for index in order {
+        if excess == 0 {
+            break;
+        }
+        drop.push(index);
+        excess -= 1;
+    }
+    let mut index = 0;
+    file.approvals.retain(|_| {
+        let keep = !drop.contains(&index);
+        index += 1;
+        keep
+    });
+}
+
+fn revoke_in(dir: &Path, project: &Project, digest: &str) -> Result<bool> {
     with_lock(dir, || {
         let mut file = read(dir)?;
         let before = file.approvals.len();
-        file.approvals.retain(|e| !matches(e, project));
+        file.approvals
+            .retain(|e| !(matches(e, project) && e.digest == digest));
         let removed = file.approvals.len() != before;
         if removed {
             write(dir, &file)?;
         }
         Ok(removed)
     })
+}
+
+fn revoke_all_in(dir: &Path, project: &Project) -> Result<usize> {
+    with_lock(dir, || {
+        let mut file = read(dir)?;
+        let before = file.approvals.len();
+        file.approvals.retain(|e| !matches(e, project));
+        let removed = before - file.approvals.len();
+        if removed > 0 {
+            write(dir, &file)?;
+        }
+        Ok(removed)
+    })
+}
+
+fn approvals_in(dir: &Path, project: &Project) -> Result<Vec<Approved>> {
+    let mut approvals: Vec<Approved> = read(dir)?
+        .approvals
+        .into_iter()
+        .filter(|e| matches(e, project))
+        .map(|e| Approved {
+            digest: e.digest,
+            version: e.version,
+            approved_at: e.approved_at,
+        })
+        .collect();
+    approvals.sort_by_key(|a| a.approved_at);
+    Ok(approvals)
 }
 
 /// The file holds every project's approvals, so writers take a lock.
@@ -451,18 +581,116 @@ mod tests {
             other => panic!("{other:?}"),
         }
 
-        // Approving again replaces the entry instead of adding one.
+        // Approving the changed content adds an approval; the earlier one
+        // stands, so going back to what was approved is trusted again.
         approve_in(dir.path(), &project).unwrap();
         assert_eq!(state_in(dir.path(), &project).unwrap(), TrustState::Trusted);
         let text = std::fs::read_to_string(dir.path().join("trust.toml")).unwrap();
-        assert_eq!(text.matches("[[approval]]").count(), 1, "{text}");
+        assert_eq!(text.matches("[[approval]]").count(), 2, "{text}");
         assert!(text.contains("version = 2"), "{text}");
+        project.config.hooks.setup.pop();
+        assert_eq!(digest(&project), expected);
+        assert_eq!(state_in(dir.path(), &project).unwrap(), TrustState::Trusted);
+        // Identical content is approved once.
+        approve_in(dir.path(), &project).unwrap();
+        let text = std::fs::read_to_string(dir.path().join("trust.toml")).unwrap();
+        assert_eq!(text.matches("[[approval]]").count(), 2, "{text}");
 
-        assert!(revoke_in(dir.path(), &project).unwrap());
-        assert!(!revoke_in(dir.path(), &project).unwrap());
+        // Revoking withdraws the scope in hand, not the project's others.
+        assert!(revoke_in(dir.path(), &project, &expected).unwrap());
+        assert!(!revoke_in(dir.path(), &project, &expected).unwrap());
+        assert_eq!(
+            untrusted(state_in(dir.path(), &project).unwrap()),
+            (true, false),
+            "the other approval is still on record"
+        );
+        assert_eq!(revoke_all_in(dir.path(), &project).unwrap(), 1);
         assert_eq!(
             untrusted(state_in(dir.path(), &project).unwrap()),
             (false, false)
+        );
+    }
+
+    #[test]
+    fn a_project_keeps_a_bounded_set_of_approvals_and_drops_the_oldest_first() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_t, project) = with_hooks(&["make"]);
+        let (_u, other) = with_hooks(&["make"]);
+        let digest = |n: usize| format!("{n:064x}");
+        for n in 0..MAX_APPROVALS + 5 {
+            save_in(dir.path(), &project, &digest(n), VERSION).unwrap();
+        }
+        // Another project's approvals are its own: neither counted nor pruned.
+        save_in(dir.path(), &other, &digest(999), VERSION).unwrap();
+        let kept: Vec<String> = approvals_in(dir.path(), &project)
+            .unwrap()
+            .into_iter()
+            .map(|a| a.digest)
+            .collect();
+        assert_eq!(kept.len(), MAX_APPROVALS);
+        assert_eq!(kept.first(), Some(&digest(5)), "the five oldest went");
+        assert_eq!(kept.last(), Some(&digest(MAX_APPROVALS + 4)));
+        assert_eq!(approvals_in(dir.path(), &other).unwrap().len(), 1);
+
+        // Approving again an approval that is still there makes it the newest,
+        // so it is not the next to go.
+        save_in(dir.path(), &project, &digest(5), VERSION).unwrap();
+        save_in(dir.path(), &project, &digest(1000), VERSION).unwrap();
+        let kept: Vec<String> = approvals_in(dir.path(), &project)
+            .unwrap()
+            .into_iter()
+            .map(|a| a.digest)
+            .collect();
+        assert_eq!(kept.len(), MAX_APPROVALS);
+        assert!(kept.contains(&digest(5)));
+        assert!(!kept.contains(&digest(6)));
+        assert_eq!(kept.last(), Some(&digest(1000)));
+    }
+
+    #[test]
+    fn pruning_never_drops_the_scope_being_approved() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_t, project) = with_hooks(&["make"]);
+        // A clock that went back: every approval on record is dated after now.
+        let future = "2099-01-01T00:00:00Z";
+        let old: String = (0..MAX_APPROVALS)
+            .map(|n| {
+                format!(
+                    "[[approval]]\nproject_id = \"{}\"\nroot = {:?}\ndigest = \"{n:064x}\"\n\
+                     approved_at = \"{future}\"\nversion = 2\n\n",
+                    project.id(),
+                    project.root.display().to_string(),
+                )
+            })
+            .collect();
+        std::fs::write(dir.path().join("trust.toml"), old).unwrap();
+        approve_in(dir.path(), &project).unwrap();
+        assert_eq!(state_in(dir.path(), &project).unwrap(), TrustState::Trusted);
+        assert_eq!(
+            approvals_in(dir.path(), &project).unwrap().len(),
+            MAX_APPROVALS
+        );
+    }
+
+    #[test]
+    fn revoking_one_scope_leaves_the_rest_and_revoking_all_leaves_other_projects() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_t, project) = with_hooks(&["make"]);
+        let (_u, other) = with_hooks(&["make"]);
+        let digest = |n: usize| format!("{n:064x}");
+        for n in 0..3 {
+            save_in(dir.path(), &project, &digest(n), VERSION).unwrap();
+        }
+        save_in(dir.path(), &other, &digest(0), VERSION).unwrap();
+        assert!(revoke_in(dir.path(), &project, &digest(1)).unwrap());
+        assert!(!revoke_in(dir.path(), &project, &digest(1)).unwrap());
+        assert_eq!(approvals_in(dir.path(), &project).unwrap().len(), 2);
+        assert_eq!(revoke_all_in(dir.path(), &project).unwrap(), 2);
+        assert_eq!(revoke_all_in(dir.path(), &project).unwrap(), 0);
+        assert_eq!(
+            approvals_in(dir.path(), &other).unwrap().len(),
+            1,
+            "another project's approvals are untouched"
         );
     }
 
@@ -631,6 +859,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (t, _) = with_hooks(&[]);
         let project = reopen(&t, "[hooks]\nswitch = [\"echo in\"]", "");
+        // The branch carries the same recipes: they are committed.
+        testutil::commit_all(&project.repo().unwrap(), "hooks");
         let linked = crate::worktree::create(&project, "feature/a", None).unwrap();
         let daemon = "[daemons.api]\nrun = \"bun run dev\"\n";
         std::fs::write(t.root.join("pitchfork.toml"), daemon).unwrap();
@@ -665,9 +895,11 @@ mod tests {
         assert!(error.contains("changed since it was shown"), "{error}");
         approve_scope_in(dir.path(), &project, &linked.path, &reviewed).unwrap();
         assert_eq!(state_at(&linked.path).unwrap(), TrustState::Trusted);
-        // There is one approval per project and main checkout, so it now
-        // holds the worktree's scope.
-        assert_eq!(untrusted(state_at(&t.root).unwrap()), (true, false));
+        // Approvals are kept per digest: approving the worktree's scope did not
+        // revoke the main checkout's.
+        assert_eq!(state_at(&t.root).unwrap(), TrustState::Trusted);
+        assert_eq!(state_at(&linked.path).unwrap(), TrustState::Trusted);
+        assert_eq!(approvals_in(dir.path(), &project).unwrap().len(), 2);
     }
 
     #[test]

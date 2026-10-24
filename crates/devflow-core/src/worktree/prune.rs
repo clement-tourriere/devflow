@@ -637,7 +637,10 @@ mod tests {
         bind(&t, "busy", None);
         let listed = candidates(&t.project).unwrap();
         assert!(listed[0].refusal.is_none());
-        let held = Receipt::try_lock(&ws.git_dir).unwrap().expect("free");
+        // (Retried: the listing above just held the lock, and a process another
+        // test thread is spawning can hold a duplicate of its descriptor for a
+        // few milliseconds.)
+        let held = Receipt::lock_retrying(&ws.git_dir).unwrap().expect("free");
         let listed = candidates(&t.project).unwrap();
         assert_eq!(listed[0].refusal, Some(PruneRefusal::Busy));
         let outcome = prune(&t.project, &targets(&listed)).unwrap();

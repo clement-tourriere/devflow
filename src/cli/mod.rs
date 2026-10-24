@@ -5,6 +5,7 @@ mod config;
 mod db;
 mod env;
 mod exec;
+mod focus;
 mod gc;
 mod hooks;
 mod init;
@@ -13,8 +14,10 @@ mod open;
 mod output;
 mod processes;
 mod project;
+mod rest;
 mod service;
 mod shell;
+mod sqlite;
 mod system;
 mod trust;
 mod wait;
@@ -132,6 +135,19 @@ enum Command {
     Down(processes::DownArgs),
     /// Show the workspace's daemons: state, port and URL
     Ps(processes::PsArgs),
+    /// Rest a workspace (or the idle ones): stop its own containers and daemons, keep its data
+    Suspend(rest::SuspendArgs),
+    /// Enter a workspace again, which starts what suspend stopped (no change of directory)
+    Resume(rest::ResumeArgs),
+    /// Keep a workspace out of `suspend --idle`
+    Pin(rest::PinArgs),
+    /// Let `suspend --idle` select a workspace again
+    Unpin(rest::PinArgs),
+    /// Forward canonical loopback ports (3000) to the workspace in use; show it; --stop ends it
+    Focus(focus::FocusArgs),
+    /// Run the focus forwarder (started by devflow itself)
+    #[command(name = "__focus", hide = true)]
+    ServeFocus(focus::ServeArgs),
     /// Is pitchfork installed and is its proxy on; install it (asks first)
     Pitchfork {
         #[command(subcommand)]
@@ -177,6 +193,11 @@ impl Command {
             Command::Up(_) => "up",
             Command::Down(_) => "down",
             Command::Ps(_) => "ps",
+            Command::Suspend(_) => "suspend",
+            Command::Resume(_) => "resume",
+            Command::Pin(_) => "pin",
+            Command::Unpin(_) => "unpin",
+            Command::Focus(_) => "focus",
             Command::Pitchfork { action } => action.json_name(),
             Command::Service(args) => args.command.json_name(),
             Command::Doctor => "doctor",
@@ -184,13 +205,15 @@ impl Command {
             | Command::Completions(_)
             | Command::Gui
             | Command::Exec(_)
-            | Command::Coordinate(_) => return None,
+            | Command::Coordinate(_)
+            | Command::ServeFocus(_) => return None,
         })
     }
 
     fn display_name(&self) -> &'static str {
         match self {
             Command::Coordinate(_) => "__clone",
+            Command::ServeFocus(_) => "__focus",
             Command::Exec(_) => "exec",
             Command::ShellInit(_) => "shell-init",
             Command::Completions(_) => "completions",
@@ -544,6 +567,12 @@ fn run(ctx: &Ctx, command: Command) -> Result<ExitCode> {
         Command::Db { command } => db::run(ctx, command),
         Command::Up(args) => processes::up(ctx, args),
         Command::Down(args) => processes::down(ctx, args),
+        Command::Suspend(args) => rest::suspend(ctx, args),
+        Command::Resume(args) => rest::resume(ctx, args),
+        Command::Pin(args) => rest::pin(ctx, args, true),
+        Command::Unpin(args) => rest::pin(ctx, args, false),
+        Command::Focus(args) => focus::run(ctx, args),
+        Command::ServeFocus(args) => focus::serve(args),
         Command::Ps(args) => processes::ps(ctx, args),
         Command::Pitchfork { action } => processes::pitchfork_command(ctx, action),
         Command::Service(args) => service::run(ctx, args),

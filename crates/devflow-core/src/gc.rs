@@ -92,9 +92,21 @@ pub enum Cause {
     ReceiptUnreadable,
     /// The worktree is still registered but its receipt is gone.
     ReceiptMissing,
-    /// The record was written for another repository that is still there (a
-    /// copy of this one).
+    /// The record was written for another repository directory: a copy of this
+    /// one, a restored backup, or a repository at another path that nothing
+    /// shows is this one moved. It is never acted on until the person confirms
+    /// that it belongs here ([`rebind`]). `common_dir` is where the record says
+    /// it was written (the same path as this repository's, for a copy made to
+    /// the same place).
     OtherCheckout { common_dir: PathBuf },
+    /// Whether something is at `path` could not be told (permission denied, an
+    /// I/O error): only "not found" is absence, so the record's workspace is
+    /// not taken for gone.
+    Uninspectable { path: PathBuf },
+    /// Git has the worktree registered, a directory is at its place, and Git
+    /// cannot open it as a checkout (a broken `.git` file, a directory it
+    /// cannot read): not a missing directory.
+    CheckoutNotOpenable { path: PathBuf },
     /// The record belongs to another project.
     OtherProject,
     /// The folder the worktree was in is missing or unreadable too: a drive
@@ -264,6 +276,17 @@ impl Entry {
     }
 }
 
+impl Entry {
+    /// Whether the person can confirm that this record belongs to the
+    /// repository it is read by ([`rebind`]): it was written for another
+    /// directory, or for one nothing proves is this.
+    pub fn rebindable(&self) -> bool {
+        self.has_record
+            && self.generation.is_some()
+            && matches!(self.cause, Some(Cause::OtherCheckout { .. }))
+    }
+}
+
 /// The inventory of a project.
 #[derive(Debug, Clone, Serialize)]
 pub struct Inventory {
@@ -349,17 +372,27 @@ fn registered(project: &Project) -> Result<Vec<Registered>> {
     Ok(worktree::list(project)?
         .into_iter()
         .map(|workspace| {
-            let receipt = if workspace.git_dir.is_dir() {
-                match Receipt::load(&workspace.git_dir) {
+            // Only "not found" is the absence of the administrative directory
+            // (and of the receipt in it); a directory that cannot be inspected
+            // may well hold one.
+            let receipt = match stat(&workspace.git_dir) {
+                Stat::Gone => ReceiptState::Absent,
+                Stat::Unknown(why) => ReceiptState::Unreadable(format!(
+                    "{} cannot be inspected ({why})",
+                    workspace.git_dir.display()
+                )),
+                Stat::There if !workspace.git_dir.is_dir() => ReceiptState::Unreadable(format!(
+                    "{} is not a directory",
+                    workspace.git_dir.display()
+                )),
+                Stat::There => match Receipt::load(&workspace.git_dir) {
                     Ok(Some(receipt)) if receipt.project_id == project.id() => {
                         ReceiptState::Instance(receipt.instance_id)
                     }
                     Ok(Some(_)) => ReceiptState::Unreadable("it belongs to another project".into()),
                     Ok(None) => ReceiptState::Absent,
                     Err(e) => ReceiptState::Unreadable(format!("{e:#}")),
-                }
-            } else {
-                ReceiptState::Absent
+                },
             };
             Registered {
                 admin_id: admin_id_of(&workspace),
@@ -407,6 +440,36 @@ impl Verdict {
     }
 }
 
+/// What the file system says about a path. Only "not found" is absence: a
+/// permission error, an I/O error or anything else says nothing about whether
+/// it is there, and what is not known is never taken for gone.
+enum Stat {
+    There,
+    Gone,
+    Unknown(String),
+}
+
+fn stat(path: &Path) -> Stat {
+    match path.symlink_metadata() {
+        Ok(_) => Stat::There,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Stat::Gone,
+        Err(e) => Stat::Unknown(e.to_string()),
+    }
+}
+
+/// The verdict for a path whose absence matters but could not be told.
+fn uninspectable(path: &Path, why: &str) -> Verdict {
+    Verdict::unknown(
+        Cause::Uninspectable {
+            path: path.to_path_buf(),
+        },
+        format!(
+            "whether {} is there could not be told ({why}), so it is not taken for gone",
+            path.display()
+        ),
+    )
+}
+
 /// The folder a worktree was in must be there and readable; otherwise it is
 /// likely a drive that is not connected.
 fn parent_problem(path: &Path) -> Option<PathBuf> {
@@ -420,44 +483,78 @@ fn classify(project: &Project, record: &Record, registered: &[Registered]) -> Ve
     if record.project_id != project.id() {
         return Verdict::unknown(Cause::OtherProject, "the record belongs to another project");
     }
+    let now = ledger::Checkout {
+        main: project.root.clone(),
+        common_dir: project.git_common_dir.clone(),
+        identity: ledger::repository_identity(&project.git_common_dir),
+    };
+    let was = &record.checkout;
+    let where_ = was.common_dir.display();
     let mut relocated = false;
-    if record.checkout.common_dir != project.git_common_dir {
-        // A record is acted on by the repository it was written for. Another
-        // path is the same repository only on positive evidence: the directory
-        // the record was written in is this very directory, moved. A copy of
-        // the repository (another machine, a restored backup, a VM clone) has
-        // other directories, and its records, which name branches on servers it
-        // may share with the original, must not acquire the right to delete them
-        // because the original's path happens to be missing or unreadable here.
-        let moved = !record.checkout.common_dir.exists()
-            && match (
-                record.checkout.identity.as_deref(),
-                ledger::repository_identity(&project.git_common_dir),
-            ) {
-                (Some(was), Some(now)) => was == now,
-                _ => false,
-            };
-        if !moved {
-            let where_ = record.checkout.common_dir.display();
-            return Verdict::unknown(
-                Cause::OtherCheckout {
-                    common_dir: record.checkout.common_dir.clone(),
-                },
-                if record.checkout.common_dir.exists() {
+    // A record is acted on by the repository it was written for, and only that
+    // one: the path never proves it (a repository copied to another machine at
+    // the same absolute path, or restored from a backup, keeps every path), the
+    // directory's identity does. A copy's records name branches on servers it
+    // may share with the original; they must not acquire the right to delete
+    // them.
+    match was.standing(&now) {
+        ledger::Standing::SameDirectory if was.common_dir == now.common_dir => {}
+        ledger::Standing::SameDirectory => match stat(&was.common_dir) {
+            // The same directory, and not at the old path any more: moved.
+            Stat::Gone => relocated = true,
+            Stat::There => {
+                return Verdict::unknown(
+                    Cause::OtherCheckout {
+                        common_dir: was.common_dir.clone(),
+                    },
                     format!(
                         "the record was written for the repository at {where_}, which is still \
-                         there; this one is a copy"
-                    )
-                } else {
-                    format!(
-                        "the record was written for the repository at {where_}, and nothing \
-                         shows that this is that repository moved rather than a copy of it; \
-                         setting a workspace of this checkout up again refreshes its records"
-                    )
+                         there as well as here"
+                    ),
+                );
+            }
+            Stat::Unknown(why) => return uninspectable(&was.common_dir, &why),
+        },
+        // A file system that gives no identity (on either side) cannot tell a
+        // copy from the original; the person's confirmation on this machine,
+        // for this path (`rebind` leaves it), is the one proof there is.
+        ledger::Standing::NotProven
+            if was.identity.is_none()
+                && now.identity.is_none()
+                && was.common_dir == now.common_dir
+                && ledger::bound_here(record.project_id, record.instance_id, &now.common_dir) => {}
+        ledger::Standing::NotProven => {
+            let reason = match (&was.identity, &now.identity) {
+                _ if was.common_dir == now.common_dir => format!(
+                    "the record was written for a repository directory at {where_} that is not \
+                     this one: it was copied or restored to this path, or {}",
+                    if was.identity.is_none() && now.identity.is_none() {
+                        "this file system does not say which directory a repository is, so a \
+                         copy cannot be told from the original"
+                    } else if was.identity.is_none() {
+                        "it does not say which directory it was written for"
+                    } else if now.identity.is_none() {
+                        "this file system does not say which directory this repository is"
+                    } else {
+                        "it was created at another time"
+                    }
+                ),
+                (Some(_), Some(_)) => format!(
+                    "the record was written for the repository at {where_}, which is another \
+                     directory than this one: this repository is a copy"
+                ),
+                _ => format!(
+                    "the record was written for the repository at {where_}, and nothing shows \
+                     that this is that repository moved rather than a copy of it"
+                ),
+            };
+            return Verdict::unknown(
+                Cause::OtherCheckout {
+                    common_dir: was.common_dir.clone(),
                 },
+                reason,
             );
         }
-        relocated = true;
     }
     let mut verdict = classify_placed(record, registered);
     verdict.relocated = relocated;
@@ -496,14 +593,13 @@ fn classify_placed(record: &Record, registered: &[Registered]) -> Verdict {
                 ),
             );
         }
-        if record.worktree.symlink_metadata().is_ok() {
-            if replaced(record) {
-                return Verdict::because(
-                    Class::RemovedElsewhere,
-                    "another directory is at its place now",
-                );
-            }
-            return Verdict::unknown(
+        return match stat(&record.worktree) {
+            Stat::Gone => Verdict::of(Class::RemovedElsewhere),
+            Stat::There if replaced(record) => Verdict::because(
+                Class::RemovedElsewhere,
+                "another directory is at its place now",
+            ),
+            Stat::There => Verdict::unknown(
                 Cause::Unregistered {
                     path: record.worktree.clone(),
                 },
@@ -511,9 +607,9 @@ fn classify_placed(record: &Record, registered: &[Registered]) -> Verdict {
                     "a directory is still at {}, and Git has no registration for it",
                     record.worktree.display()
                 ),
-            );
-        }
-        return Verdict::of(Class::RemovedElsewhere);
+            ),
+            Stat::Unknown(why) => uninspectable(&record.worktree, &why),
+        };
     };
     let workspace = &found.workspace;
     match &found.receipt {
@@ -530,6 +626,25 @@ fn classify_placed(record: &Record, registered: &[Registered]) -> Verdict {
                 );
             }
             if workspace.missing {
+                // Git could not open a checkout there. That is a missing
+                // directory only if nothing is at the path: an unreadable
+                // directory, a broken `.git` file and a permission error are
+                // not absence.
+                match stat(&workspace.path) {
+                    Stat::Gone => {}
+                    Stat::There => {
+                        return Verdict::unknown(
+                            Cause::CheckoutNotOpenable {
+                                path: workspace.path.clone(),
+                            },
+                            format!(
+                                "a directory is at {}, and Git cannot open it as a checkout",
+                                workspace.path.display()
+                            ),
+                        );
+                    }
+                    Stat::Unknown(why) => return uninspectable(&workspace.path, &why),
+                }
                 if let Some(parent) = parent_problem(&workspace.path) {
                     return Verdict::unknown(
                         Cause::ParentMissing {
@@ -1218,6 +1333,17 @@ fn remedies_of(
         Some(Cause::ReceiptMissing | Cause::ReceiptUnreadable) => vec![Remedy::Setup {
             workspace: record.worktree.clone(),
         }],
+        // The person decides whether the record belongs here.
+        Some(Cause::OtherCheckout { .. }) => vec![
+            Remedy::RebindRecord {
+                root,
+                instance: record.instance_id,
+            },
+            Remedy::Retry,
+        ],
+        Some(Cause::Uninspectable { path } | Cause::CheckoutNotOpenable { path }) => {
+            vec![Remedy::Reveal { path: path.clone() }, Remedy::Retry]
+        }
         Some(Cause::RecordUnreadable { file }) => vec![Remedy::Reveal { path: file.clone() }],
         _ if class == Class::Active && record.state == ledger::State::Removing => {
             vec![Remedy::RemoveWorkspace {
@@ -1227,6 +1353,113 @@ fn remedies_of(
         }
         _ => Vec::new(),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Binding a record to this repository
+
+/// The records the person confirms belong to this repository. Each is named
+/// with the generation they were shown ([`Entry::target`]).
+#[derive(Debug, Clone, Default)]
+pub struct RebindRequest {
+    pub targets: Vec<Target>,
+}
+
+/// A record that now belongs to this repository.
+#[derive(Debug, Clone, Serialize)]
+pub struct Rebound {
+    pub instance: Uuid,
+    pub workspace: String,
+    /// Where the record said it was written.
+    pub from: PathBuf,
+    /// What the clean-up makes of it now.
+    pub class: Class,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct RebindOutcome {
+    pub rebound: Vec<Rebound>,
+    pub skipped: Vec<Skipped>,
+}
+
+/// Bind the records `request` names to this repository, after the person
+/// confirmed that they belong here.
+///
+/// A record written for another repository directory (a copy, a restored
+/// backup at the same path, a move nothing proves) is `unknown` and never
+/// removable, because its resources may be shared with the repository it was
+/// written for. This is the one way out: it changes whose record it is and
+/// removes nothing, and what it names is then judged like any other record's.
+/// Each record is read again first and must still be the one that was shown,
+/// waiting for no other operation on it; every binding is journaled in the
+/// record.
+pub fn rebind(
+    project: &Project,
+    request: &RebindRequest,
+    say: &mut dyn FnMut(&str),
+) -> Result<RebindOutcome> {
+    let mut outcome = RebindOutcome::default();
+    for target in &request.targets {
+        match rebind_one(project, target, say) {
+            Ok(rebound) => outcome.rebound.push(rebound),
+            Err(skipped) => outcome.skipped.push(skipped),
+        }
+    }
+    Ok(outcome)
+}
+
+fn rebind_one(
+    project: &Project,
+    target: &Target,
+    say: &mut dyn FnMut(&str),
+) -> std::result::Result<Rebound, Skipped> {
+    let common = &project.git_common_dir;
+    let failed = |e: anyhow::Error| skipped(target, None, format!("{e:#}"));
+    let _operation = ledger::try_instance_lock(common, target.instance)
+        .map_err(failed)?
+        .ok_or_else(|| busy(target))?;
+    let entry = fresh(project, target.instance)
+        .map_err(failed)?
+        .ok_or_else(|| skipped(target, None, "it has no record any more"))?;
+    let name = entry.workspace.clone();
+    if entry.generation.as_deref() != Some(target.generation.as_str()) {
+        return Err(skipped(
+            target,
+            Some(&name),
+            "it changed since it was shown; look at the inventory again",
+        ));
+    }
+    if !entry.rebindable() {
+        return Err(skipped(
+            target,
+            Some(&name),
+            "its record was written for this repository as far as devflow can tell, or for \
+             another project: there is nothing to bind",
+        ));
+    }
+    say(&format!(
+        "binding the record of '{name}' to this repository"
+    ));
+    let now = ledger::Checkout {
+        main: project.root.clone(),
+        common_dir: project.git_common_dir.clone(),
+        identity: ledger::repository_identity(&project.git_common_dir),
+    };
+    let from = ledger::Handle::new(common, target.instance)
+        .rebind(now, &target.generation)
+        .map_err(|e| skipped(target, Some(&name), format!("{e:#}")))?
+        .ok_or_else(|| skipped(target, Some(&name), "it has no record any more"))?;
+    let class = fresh(project, target.instance)
+        .ok()
+        .flatten()
+        .map(|entry| entry.class)
+        .unwrap_or(Class::Unknown);
+    Ok(Rebound {
+        instance: target.instance,
+        workspace: name,
+        from,
+        class,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -1269,6 +1502,9 @@ pub struct Removed {
     pub still_recorded: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub may_still_run: Option<MayStillRun>,
+    /// The focus pointed at this instance and was ended with it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub released_focus: Option<crate::focus::Released>,
     pub warnings: Vec<String>,
 }
 
@@ -1284,6 +1520,11 @@ pub struct Skipped {
     pub done: Vec<String>,
     /// `force` goes on past the reason.
     pub forceable: bool,
+    /// Another operation on the instance holds its lock (a setup still
+    /// creating what its record names, a removal, another clean-up): nothing
+    /// was looked at or changed, and it can be asked again once that is over.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub busy: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -1318,6 +1559,20 @@ fn skipped(target: &Target, workspace: Option<&str>, reason: impl Into<String>) 
         reason: reason.into(),
         done: Vec::new(),
         forceable: false,
+        busy: false,
+    }
+}
+
+/// An instance another operation holds: left as it is.
+fn busy(target: &Target) -> Skipped {
+    Skipped {
+        busy: true,
+        ..skipped(
+            target,
+            None,
+            "another operation on this workspace is running (a setup that is still creating \
+             its data, a removal or another clean-up); nothing was changed",
+        )
     }
 }
 
@@ -1365,15 +1620,12 @@ fn remove_one(
 ) -> std::result::Result<Removed, Skipped> {
     let common = &project.git_common_dir;
     let failed = |e: anyhow::Error| skipped(target, None, format!("{e:#}"));
-    let _removal = ledger::try_removal_lock(common, target.instance)
+    // Before anything is read: a setup that holds the lock may be creating
+    // the very branch the record lists as pending, and a clean-up that settled
+    // it as "not there" would lose it.
+    let _operation = ledger::try_instance_lock(common, target.instance)
         .map_err(failed)?
-        .ok_or_else(|| {
-            skipped(
-                target,
-                None,
-                "another clean-up of this workspace is running",
-            )
-        })?;
+        .ok_or_else(|| busy(target))?;
     let entry = fresh(project, target.instance)
         .map_err(failed)?
         .ok_or_else(|| skipped(target, None, "it has no record any more"))?;
@@ -1420,6 +1672,7 @@ fn remove_one(
         snapshots: Vec::new(),
         still_recorded: Vec::new(),
         may_still_run: None,
+        released_focus: None,
         warnings: Vec::new(),
     };
     if entry.class == Class::Missing {
@@ -1586,6 +1839,8 @@ fn remove_missing(
         }),
         expect_branches: target.backend.clone(),
         before_effects: Some(gate),
+        // `remove_one` took it before it read anything.
+        holds_instance_lock: true,
         ..RemoveOptions::default()
     };
     let result = setup::remove_workspace(project, workspace, options, &mut NoProgress);
@@ -1597,6 +1852,7 @@ fn remove_missing(
                 .map(|id| vec![format!("dropped branch {id}")])
                 .unwrap_or_default();
             removed.still_recorded = done.still_recorded;
+            removed.released_focus = done.released_focus;
             removed.may_still_run = done.may_still_run;
             removed.warnings.extend(done.warnings);
             Ok(removed)
@@ -1628,6 +1884,23 @@ fn remove_recorded(
         forceable,
         ..skipped(target, Some(&name), reason)
     };
+
+    // The focus on it ends before anything is dropped, and before its port can
+    // go back to the pool (it may be given to another workspace, to which a
+    // forward left behind would lead). A forwarder that cannot be seen to stop
+    // keeps the port reserved: nothing below runs.
+    match crate::focus::release_instance(record.project_id, record.instance_id) {
+        Ok(released) => removed.released_focus = released,
+        Err(error) => {
+            return Err(partial(
+                &removed,
+                format!(
+                    "the focus on '{name}' could not be ended, so its port stays reserved: {error:#}"
+                ),
+                false,
+            ));
+        }
+    }
 
     // Daemons: asked about, never stopped (pitchfork would run their lifecycle
     // hooks from a configuration nobody approved). The record stops listing
@@ -1804,23 +2077,16 @@ fn snapshot_all(
                     .service
                     .as_deref()
                     .context("a container branch without a service")?;
+                // What was shown is what is copied: the expectation travels
+                // with the operation and the coordinator checks it again under
+                // the locks, before it captures anything.
+                let expect = crate::services::catalog::SourceExpect {
+                    owner: Some(instance),
+                    generation: branch.generation,
+                    volume: branch.volume.clone(),
+                };
                 Service::recorded(project, key, engine)
-                    .and_then(|svc| {
-                        svc.snapshot_branch_if(branch.id, &name, |current| {
-                            ensure!(
-                                current.owner == Some(instance),
-                                "branch {} was not created by this workspace's instance",
-                                branch.id
-                            );
-                            ensure!(
-                                branch.generation.is_none_or(|g| g == current.generation)
-                                    && branch.volume.as_ref().is_none_or(|v| *v == current.volume),
-                                "branch {} was reset since it was shown",
-                                branch.id
-                            );
-                            Ok(())
-                        })
-                    })
+                    .and_then(|svc| svc.snapshot_branch_expecting(branch.id, &name, Some(&expect)))
                     .map(|snap| format!("{key}/{}@v{}", snap.name, snap.version))
             }
             None => Err(anyhow::anyhow!(

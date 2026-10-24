@@ -477,6 +477,7 @@ pub fn ensure_namespace(
 /// persists daemon environments in its state file); the one channel is mise.
 /// Empty when everything is wired or there is nothing to deliver.
 pub fn env_wiring(project: &Project, dir: &Path) -> Vec<String> {
+    let project = project.at(dir);
     let processes = ProcessesScope::read(dir);
     let names: BTreeSet<&str> = processes
         .layers
@@ -638,7 +639,7 @@ pub enum Refusal {
         file: Option<String>,
     },
     /// What pitchfork runs for this workspace could not be read (the listing
-    /// failed, or pitchfork lacks a feature devflow needs to ask), so devflow
+    /// failed, or pitchfork is older than devflow supports), so devflow
     /// cannot say that nothing runs. Unlike the refusals above, `--force`
     /// answers it: the person accepts not knowing.
     StateUnknown {
@@ -1655,9 +1656,9 @@ pub fn may_have_daemons(project: &Project, workspace: &Workspace) -> bool {
 }
 
 /// Is there a pitchfork devflow can use? Its version if so, else why not. Usable
-/// means it runs and has every feature devflow calls (see
+/// means it runs and is a release devflow supports (see
 /// [`pitchfork::Detection::usable`]), judged by the detection remembered for a
-/// few seconds, so a refresh does not ask three subcommands for their help.
+/// few seconds, so a refresh does not run `--version` each time.
 pub fn probe(pitchfork: Option<&Pitchfork>) -> Result<String, String> {
     let Some(pitchfork) = pitchfork else {
         return Err("pitchfork was not found on PATH".to_string());
@@ -2119,9 +2120,9 @@ impl ProcessReport {
 }
 
 /// The pitchfork to act with, or why there is none. Not enough that it runs: a
-/// build without a feature devflow calls (see [`pitchfork::Detection`]) is
-/// refused by name, since the effect would otherwise be a command that means
-/// something else on that build.
+/// release older than the pin (see [`pitchfork::Detection`]) is refused by
+/// name, since the effect would otherwise be a command that means something
+/// else on that build.
 fn detected(pitchfork: Option<&Pitchfork>) -> Result<Pitchfork, Refusal> {
     let Some(pitchfork) = pitchfork else {
         return Err(Refusal::NotInstalled {
@@ -2274,6 +2275,8 @@ fn start_locked(
     // that devflow started daemons here, which a removal or a stop must not
     // forget (see `supervisor_down`).
     record_start(project, workspace, &ids, lock)?;
+    // Daemons about to run: the workspace is not at rest any more.
+    crate::suspend::clear_mark(project, workspace);
     let ran = pitchfork.start(&workspace.path, &ids, options.timeout)?;
     Ok(report_after(
         pitchfork,
@@ -2533,6 +2536,19 @@ pub fn stop_with(
     let pitchfork = detected(pitchfork)?;
     let lock = process_lock(workspace)?;
     stop_locked(&pitchfork, project, workspace, options, &lock)
+}
+
+/// [`stop_with`] by a caller that already holds the workspace's process lock
+/// (and keeps it after, for what it does next).
+pub(crate) fn stop_held(
+    pitchfork: Option<&Pitchfork>,
+    project: &Project,
+    workspace: &Workspace,
+    options: &StopOptions,
+    lock: &ProcessLock,
+) -> Result<ProcessReport> {
+    let pitchfork = detected(pitchfork)?;
+    stop_locked(&pitchfork, project, workspace, options, lock)
 }
 
 /// [`stop_with`] by a caller that holds the process lock.

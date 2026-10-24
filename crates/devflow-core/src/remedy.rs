@@ -53,6 +53,11 @@ pub enum Remedy {
     /// Review and approve what a workspace asks to run (hooks, `[env]`
     /// recipes, pitchfork processes) so that setup may apply it.
     Trust { workspace: PathBuf },
+    /// Use the default workspace's recipes (hooks, `[env]`, copy list) in a
+    /// workspace whose own `devflow.toml` is missing or unusable: an explicit
+    /// choice, recorded in its receipt, that holds only while the workspace has
+    /// no valid file of its own. The workspace is set up again with it.
+    UseDefaultRecipes { workspace: PathBuf },
     /// Start the project's managed PostgreSQL server.
     StartDatabase { root: PathBuf },
     /// Start the container of service `key` (the branch `branch`, when the
@@ -121,6 +126,12 @@ pub enum Remedy {
     /// containers or daemons, and remove the ones the person picks
     /// ([`crate::gc::inventory`], [`crate::gc::remove`]).
     CleanUp { root: PathBuf },
+    /// Bind the record of workspace instance `instance`, which was written for
+    /// another repository directory (a copy of this one, a restored backup, a
+    /// move nothing proves), to the project at `root` after the person confirms
+    /// that it belongs here ([`crate::gc::rebind`]). Until then it is never
+    /// removable; afterwards the ordinary clean-up applies to it.
+    RebindRecord { root: PathBuf, instance: Uuid },
     /// Remove the workspace `name` of the project at `root`.
     RemoveWorkspace { root: PathBuf, name: String },
     /// Switch to the workspace `name` of the project at `root`.
@@ -191,6 +202,7 @@ impl Remedy {
             Remedy::OpenGuide { .. } => "open_guide",
             Remedy::Setup { .. } => "setup",
             Remedy::Trust { .. } => "trust",
+            Remedy::UseDefaultRecipes { .. } => "use_default_recipes",
             Remedy::StartDatabase { .. } => "start_database",
             Remedy::StartService { .. } => "start_service",
             Remedy::MeasureServices { .. } => "measure_services",
@@ -205,6 +217,7 @@ impl Remedy {
             Remedy::InstallPitchfork => "install_pitchfork",
             Remedy::PruneWorktrees { .. } => "prune_worktrees",
             Remedy::CleanUp { .. } => "clean_up",
+            Remedy::RebindRecord { .. } => "rebind_record",
             Remedy::RemoveWorkspace { .. } => "remove_workspace",
             Remedy::SwitchTo { .. } => "switch_to",
             Remedy::AddEnvPreset { .. } => "add_env_preset",
@@ -234,12 +247,17 @@ impl Remedy {
                 return format!("Open {}", file_label(path));
             }
             Remedy::Reveal { .. } => "Show in file manager",
-            Remedy::OpenGuide { .. } => "Read the migration guide",
+            Remedy::OpenGuide { url } if url == crate::config::MIGRATION_GUIDE => {
+                "Read the migration guide"
+            }
+            // The page to install or upgrade a tool, Git's downloads, …
+            Remedy::OpenGuide { .. } => "Open the page",
             // Several workspaces may be listed side by side: name which.
             Remedy::Setup { workspace } => {
                 return format!("Run setup in {}", file_label(workspace));
             }
             Remedy::Trust { .. } => "Review and approve…",
+            Remedy::UseDefaultRecipes { .. } => "Use the default workspace's recipes",
             Remedy::StartDatabase { .. } => "Start the database server",
             Remedy::StartService { key, .. } => {
                 return format!("Start {key}");
@@ -266,6 +284,7 @@ impl Remedy {
             Remedy::InstallPitchfork => "Install pitchfork…",
             Remedy::PruneWorktrees { .. } => "Review missing worktrees…",
             Remedy::CleanUp { .. } => "Clean up workspaces…",
+            Remedy::RebindRecord { .. } => "Bind this record to this repository…",
             Remedy::RemoveWorkspace { name, .. } => {
                 return format!("Remove {name}…");
             }
@@ -304,6 +323,7 @@ impl Remedy {
                 | Remedy::DropLostBranch { .. }
                 | Remedy::DropOrphanDatabases { .. }
                 | Remedy::PruneWorktrees { .. }
+                | Remedy::RebindRecord { .. }
                 | Remedy::RemoveWorkspace { .. }
         )
     }
@@ -323,6 +343,9 @@ impl Remedy {
             Remedy::Init { .. } => Some("devflow init".to_string()),
             Remedy::Setup { .. } => Some("devflow setup".to_string()),
             Remedy::Trust { .. } => Some("devflow trust".to_string()),
+            Remedy::UseDefaultRecipes { .. } => {
+                Some("devflow setup --use-default-recipes".to_string())
+            }
             Remedy::StartDatabase { .. } => Some("devflow db up".to_string()),
             // The CLI starts the branch of a workspace, so the command names
             // the checkout that owns the branch; without one there is none.
@@ -358,6 +381,10 @@ impl Remedy {
             Remedy::InstallPitchfork => Some("devflow pitchfork install".to_string()),
             Remedy::PruneWorktrees { .. } => Some("devflow prune".to_string()),
             Remedy::CleanUp { .. } => Some("devflow gc".to_string()),
+            Remedy::RebindRecord { instance, .. } => Some(format!(
+                "devflow gc --rebind {}",
+                crate::ids::short(*instance)
+            )),
             Remedy::RemoveWorkspace { name, .. } => Some(format!("devflow remove {}", word(name))),
             Remedy::SwitchTo { name, .. } => Some(format!("devflow switch {}", word(name))),
             Remedy::AddEnvPreset { preset, .. } => {
@@ -426,7 +453,9 @@ impl Remedy {
             )),
             Remedy::OpenFile { path } => Some(format!("fix {}", path.display())),
             Remedy::OpenGuide { url } => Some(format!("see {url}")),
-            Remedy::Setup { workspace } | Remedy::Trust { workspace } => Some(format!(
+            Remedy::Setup { workspace }
+            | Remedy::Trust { workspace }
+            | Remedy::UseDefaultRecipes { workspace } => Some(format!(
                 "run `{}` in {}",
                 self.command()?,
                 workspace.display()
@@ -452,6 +481,13 @@ impl Remedy {
                 "run `{}` to see the workspaces whose worktree is gone and what they still own \
                  (`{} --remove ID` removes the ones you pick; nothing is removed unless you ask)",
                 self.command()?,
+                self.command()?
+            )),
+            Remedy::RebindRecord { .. } => Some(format!(
+                "run `{}` only if this record really belongs to this repository (it was copied \
+                 or restored here from the repository it was written for, and that one no \
+                 longer uses what it names): the record then becomes this repository's to \
+                 clean up, and nothing is removed by it",
                 self.command()?
             )),
             Remedy::ClearInherited => Some(
@@ -793,6 +829,10 @@ mod tests {
             Remedy::InstallPitchfork,
             Remedy::PruneWorktrees { root: "/p".into() },
             Remedy::CleanUp { root: "/p".into() },
+            Remedy::RebindRecord {
+                root: "/p".into(),
+                instance: Uuid::from_u128(0x105a6201_aaaa_4bbb_8ccc_0123456789ab),
+            },
             Remedy::RemoveWorkspace {
                 root: "/p".into(),
                 name: "a".into(),
@@ -853,6 +893,19 @@ mod tests {
         assert_eq!(all[5].label(), "Open devflow.toml");
         assert!(all[1].destructive());
         assert!(!all[3].destructive());
+    }
+
+    #[test]
+    fn a_page_to_open_is_called_the_migration_guide_only_when_it_is() {
+        let guide = |url: &str| Remedy::OpenGuide { url: url.into() }.label();
+        assert_eq!(
+            guide(crate::config::MIGRATION_GUIDE),
+            "Read the migration guide"
+        );
+        assert_eq!(
+            guide("https://mise.jdx.dev/installing-mise.html"),
+            "Open the page"
+        );
     }
 
     #[test]

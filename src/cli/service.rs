@@ -24,7 +24,7 @@ use uuid::Uuid;
 #[derive(Args)]
 pub struct ServiceArgs {
     /// The service key from `[services.KEY]` (default: the project's only
-    /// valkey, redis or mysql service)
+    /// valkey, redis or mysql service, or only sqlite service)
     #[arg(value_name = "NAME")]
     pub name: Option<String>,
     #[command(subcommand)]
@@ -165,6 +165,10 @@ pub fn run(ctx: &Ctx, args: ServiceArgs) -> Result<ExitCode> {
     let command = args.command.json_name();
     let project = ctx.project()?;
     let name = args.name.as_deref();
+    // A sqlite service is a file, not a container: its own handlers.
+    if let Some(key) = super::sqlite::target(&project, name)? {
+        return super::sqlite::run(ctx, command, &project, &key, args.command);
+    }
     match args.command {
         ServiceCommand::Status(status) => show_status(ctx, command, &project, name, status.probe),
         ServiceCommand::List(list) => show_list(ctx, command, &project, name, list.orphans),
@@ -759,7 +763,7 @@ fn snapshot(
 }
 
 /// `NAME@vN` (the version is required: deleting "the latest" is too easy to get wrong).
-fn parse_snapshot_ref(text: &str) -> Result<(String, u32)> {
+pub(super) fn parse_snapshot_ref(text: &str) -> Result<(String, u32)> {
     let (name, version) = text
         .rsplit_once("@v")
         .filter(|(name, _)| !name.is_empty())

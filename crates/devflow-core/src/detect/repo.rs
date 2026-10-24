@@ -301,10 +301,6 @@ impl Repo {
         }
     }
 
-    pub(crate) fn root(&self) -> &Path {
-        &self.root
-    }
-
     /// Record something the scan could not use.
     pub(crate) fn warn(&self, path: &str, message: impl Into<String>) {
         let warning = ScanWarning {

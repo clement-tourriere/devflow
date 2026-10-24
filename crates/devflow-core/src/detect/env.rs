@@ -8,7 +8,7 @@
 //! This is the only code that opens `.env*` files (see `Repo::open_env`):
 //! general readers refuse them, so a name that aliases a dotenv file cannot
 //! make its values appear in other facts.
-use super::facts::{EnvCategory, EnvFacts, EnvFile, EnvKey};
+use super::facts::{EnvCategory, EnvFacts, EnvKey};
 use super::manifest::Discovery;
 use super::repo::{Repo, join};
 use std::collections::{BTreeMap, HashSet};
@@ -65,11 +65,8 @@ pub(super) fn detect(repo: &Repo, discovery: &Discovery) -> EnvFacts {
                     "a quoted value is never closed; the rest of the file was ignored",
                 );
             }
-            let mut has_database_keys = false;
-            let key_count = scan.names.len();
             for name in scan.names {
                 let category = classify(&name);
-                has_database_keys |= category.is_datastore();
                 if category == EnvCategory::Other {
                     continue;
                 }
@@ -81,13 +78,7 @@ pub(super) fn detect(repo: &Repo, discovery: &Discovery) -> EnvFacts {
                     entry.1.push(path.clone());
                 }
             }
-            facts.has_database_keys |= has_database_keys;
-            facts.evidence.push(path.clone());
-            facts.files.push(EnvFile {
-                path,
-                key_count,
-                has_database_keys,
-            });
+            facts.files.push(path);
         }
     }
     facts.keys = keys
@@ -368,18 +359,6 @@ pub(super) fn classify(name: &str) -> EnvCategory {
         EnvCategory::Database
     } else if starts(&["REDIS_", "VALKEY_"]) || n == "CACHE_URL" || n == "REDIS" {
         EnvCategory::Redis
-    } else if starts(&["MONGODB_", "MONGO_"]) {
-        EnvCategory::Mongo
-    } else if starts(&["CLICKHOUSE_"]) {
-        EnvCategory::Clickhouse
-    } else if starts(&["S3_", "AWS_S3_", "MINIO_"]) {
-        EnvCategory::ObjectStorage
-    } else if starts(&["RABBITMQ_", "AMQP_", "KAFKA_", "CLOUDAMQP_"]) {
-        EnvCategory::Broker
-    } else if starts(&["ELASTICSEARCH_", "OPENSEARCH_", "MEILI", "TYPESENSE_"]) {
-        EnvCategory::Search
-    } else if starts(&["SMTP_", "MAIL_", "MAILER_"]) {
-        EnvCategory::Mail
     } else if n == "PORT" || n.ends_with("_PORT") {
         EnvCategory::Port
     } else {
@@ -619,10 +598,16 @@ mod tests {
         assert_eq!(classify("DB_HOST"), EnvCategory::Database);
         assert_eq!(classify("MYSQL_ROOT_PASSWORD"), EnvCategory::Mysql);
         assert_eq!(classify("REDIS_URL"), EnvCategory::Redis);
-        assert_eq!(classify("MONGODB_URI"), EnvCategory::Mongo);
-        assert_eq!(classify("MONGO_URL"), EnvCategory::Mongo);
-        assert_eq!(classify("CLICKHOUSE_HOST"), EnvCategory::Clickhouse);
-        assert_eq!(classify("S3_BUCKET"), EnvCategory::ObjectStorage);
+        // Names of services no proposal acts on are not reported.
+        for other in [
+            "MONGODB_URI",
+            "MONGO_URL",
+            "CLICKHOUSE_HOST",
+            "S3_BUCKET",
+            "SMTP_HOST",
+        ] {
+            assert_eq!(classify(other), EnvCategory::Other, "{other}");
+        }
         assert_eq!(classify("PORT"), EnvCategory::Port);
         assert_eq!(classify("SECRET_KEY_BASE"), EnvCategory::Other);
     }

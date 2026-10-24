@@ -162,6 +162,7 @@ fn with_unreachable_branch(t: &mut Repo, name: &str, pending: bool) -> (Workspac
             service: "db".into(),
             branch_id: branch,
             engine: Some(Engine::Postgres),
+            file: None,
         });
     } else {
         receipt.services.insert(
@@ -217,8 +218,8 @@ fn a_removal_that_accounts_for_everything_deletes_the_record_and_its_lock_files(
     let ws = create(&t, "done").workspace;
     assert_eq!(
         files(&t).len(),
-        2,
-        "the record and its lock: {:?}",
+        3,
+        "the record, its lock and the instance lock: {:?}",
         files(&t)
     );
     let outcome = remove(&t, "done", RemoveOptions::default()).unwrap();
@@ -446,8 +447,8 @@ fn a_worktree_git_removed_is_cleaned_up_by_gc_and_then_the_record_is_gone() {
     assert!(!ws.git_dir.exists());
     assert_eq!(
         files(&t).len(),
-        2,
-        "the record outlived the receipt: {:?}",
+        3,
+        "the record (with its two locks) outlived the receipt: {:?}",
         files(&t)
     );
 
@@ -770,4 +771,81 @@ fn data_the_person_kept_is_still_kept_when_the_removal_stopped_halfway_and_is_re
         outcome.warnings
     );
     assert!(files(&t).is_empty(), "{:?}", files(&t));
+}
+
+/// A `remove --keep-data` that failed part-way leaves the workspace in use: its
+/// receipt is still ready and still names the data as owned. The host's later
+/// `setup --if-new` stopped at "ready" and never reached the place that gives
+/// the data back, so the workspace went on using branches that a later removal
+/// and a clean-up excluded for good.
+#[test]
+fn if_new_gives_data_a_failed_keep_data_removal_disowned_back_to_a_workspace_in_use() {
+    let t = repo(&[], "");
+    let ws = create(&t, "reused").workspace;
+    let mut receipt = Receipt::load(&ws.git_dir).unwrap().unwrap();
+    let branch = Uuid::new_v4();
+    // The receipt names a branch as owned (a database an earlier build bound).
+    receipt.unmapped = Some(DataBinding {
+        branch_id: Some(branch),
+        database: "df_x".into(),
+        role: "role".into(),
+        url: "postgres://role@127.0.0.1:1/df_x".into(),
+        source: "empty".into(),
+        owned: true,
+    });
+    receipt.save(&ws.git_dir).unwrap();
+    let instance = receipt.instance_id;
+    let handle = ledger::Handle::new(&t.project.git_common_dir, instance);
+    assert_eq!(handle.read().unwrap().unwrap().resources.branches.len(), 1);
+
+    // The removal got as far as the record: kept data, `removing`...
+    handle.begin(None).unwrap();
+    handle.disown_branches(&[branch]).unwrap();
+    let stuck = handle.read().unwrap().unwrap();
+    assert_eq!(stuck.state, State::Removing);
+    assert!(stuck.resources.branches.is_empty() && stuck.resources.disowned == [branch]);
+    // ...and stopped, with the receipt (and the workspace) still there.
+    assert_eq!(
+        Receipt::load(&ws.git_dir).unwrap().unwrap().status(),
+        devflow_core::receipt::Status::Ready
+    );
+
+    let options = || SetupOptions {
+        pitchfork: Some(quiet_pitchfork()),
+        ..SetupOptions::default()
+    };
+    let if_new = || setup::setup(&t.project, &ws, options(), true, false, &mut NoProgress);
+
+    // A run that holds the receipt lock is a run that is writing: not touched.
+    {
+        let _held = Receipt::try_lock(&ws.git_dir).unwrap().unwrap();
+        assert!(if_new().unwrap().is_none());
+        assert_eq!(handle.read().unwrap().unwrap().state, State::Removing);
+    }
+
+    assert!(if_new().unwrap().is_none(), "ready: nothing to set up");
+    let record = handle.read().unwrap().unwrap();
+    assert_eq!(record.state, State::Active, "the removal is over");
+    assert!(record.resources.disowned.is_empty());
+    assert_eq!(
+        record
+            .resources
+            .branches
+            .iter()
+            .map(|b| b.id)
+            .collect::<Vec<_>>(),
+        [branch],
+        "owned again, so a removal and a clean-up account for it"
+    );
+    // The receipt is not touched, and nothing was provisioned.
+    let inventory = gc::inventory(
+        &t.project,
+        &gc::Options {
+            measure: false,
+            evidence: false,
+            backfill: false,
+        },
+    )
+    .unwrap();
+    assert_eq!(inventory.entry(instance).unwrap().class, Class::Active);
 }

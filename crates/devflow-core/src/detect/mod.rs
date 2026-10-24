@@ -35,12 +35,12 @@
 //!   usable. Where dotenv parsers disagree about quoting (escapes in single
 //!   quotes, backslash pairs, what counts as blank space before a quote) the
 //!   reading that keeps more text inside the value wins. Dotenv files, `.devflow/`, `.git/` and credential stores are
-//!   opened by that keys-only reader alone: a symlink named `.nvmrc` that
-//!   leads to `.env` is refused, not read as a version, and so is any file
-//!   with several hard links (the other name may be a dotenv file anywhere).
-//!   Version pins and `.tool-versions` entries are further limited to
-//!   version-like words, so a value that does get through is not a secret in
-//!   disguise.
+//!   opened by that keys-only reader alone: a symlink named `.mise.toml` that
+//!   leads to `.env` is refused, and so is any file with several hard links
+//!   (the other name may be a dotenv file anywhere). Language version pin
+//!   files (`.nvmrc` and the like) are listed by name and never opened, and
+//!   `.tool-versions` entries are limited to version-like words, so a value
+//!   that does get through is not a secret in disguise.
 //! - **Stays inside the repository.** All access goes through one `cap-std`
 //!   directory handle: each path is resolved from the root descriptor one
 //!   component at a time and symlinks are followed only while they stay
@@ -159,7 +159,6 @@ pub fn scan(root: &Path) -> Result<Facts> {
     let artifacts = artifacts::detect(&repo, &discovery, &js, &frameworks, &migrations);
 
     Ok(Facts {
-        root: repo.root().to_path_buf(),
         git: GitFacts {
             repository: repo.is_git(),
         },

@@ -20,6 +20,7 @@
 //! in an error, because the variables hold credentials.
 use crate::env_owner::ChildEnv;
 use crate::hooks::HookPhase;
+use crate::tools::{self, Reason, Tool, ToolProblem};
 use serde::Serialize;
 use std::ffi::OsString;
 use std::io::Read;
@@ -66,6 +67,11 @@ pub enum MiseDelivery {
     Untrusted { path: PathBuf },
     /// mise is not installed (or not on `PATH`).
     Unavailable,
+    /// The installed mise is not a release devflow supports
+    /// ([`tools::MIN_MISE`]): the check passes options of `mise exec` that
+    /// older releases do not have, and does not run without them. Typed, with
+    /// the remedies that fix it.
+    Unsupported { problem: ToolProblem },
     /// The check could not be made. The reason never holds a value.
     Failed { reason: String },
 }
@@ -81,6 +87,7 @@ impl MiseDelivery {
             Self::NotLoaded => "not_loaded",
             Self::Untrusted { .. } => "untrusted",
             Self::Unavailable => "unavailable",
+            Self::Unsupported { .. } => "unsupported",
             Self::Failed { .. } => "failed",
         }
     }
@@ -123,6 +130,7 @@ impl MiseDelivery {
                 shell_word(&path.display().to_string())
             ),
             Self::Unavailable => "mise is not installed or not on PATH".to_string(),
+            Self::Unsupported { problem } => problem.message(),
             Self::Failed { reason } => format!("could not check what mise resolves: {reason}"),
         }
     }
@@ -290,10 +298,13 @@ const PROBE: &str = concat!(
     "done\n",
 );
 const PROBE_MARKER: &[u8] = b"devflow-probe\0";
-/// `mise exec` flags the check wants where the installed mise knows them: no
-/// preparing of project dependencies (`[deps]` providers with `auto = true`
-/// would run an install before the hooks), and no cached environment, which
-/// could answer for configuration that has changed since.
+/// The `mise exec` flags the check passes: no preparing of project
+/// dependencies (`[deps]` providers with `auto = true` would run an install
+/// before the hooks; `--no-deps`, mise 2026.4.18) and no cached environment,
+/// which could answer for configuration that has changed since (`--fresh-env`,
+/// mise 2026.1.6). [`tools::MIN_MISE`] is the release of the newer one, so
+/// every supported mise knows both; a mise that refuses one is older than the
+/// pin and gets [`MiseDelivery::Unsupported`], never a weaker check.
 const PROBE_FLAGS: [&str; 2] = ["--no-deps", "--fresh-env"];
 
 /// The shared gate: ask mise what a command would receive and compare it
@@ -332,8 +343,7 @@ const PROBE_FLAGS: [&str; 2] = ["--no-deps", "--fresh-env"];
 ///
 /// Tools are not installed and project dependencies are not prepared by the
 /// check (`MISE_AUTO_INSTALL=0`, `MISE_EXEC_AUTO_INSTALL=0`, `--no-deps` and
-/// `--fresh-env` when the installed mise knows them); tools that are missing
-/// do not stop it.
+/// `--fresh-env`); tools that are missing do not stop it.
 ///
 /// `mise exec` trusts a configuration it has not been told to trust when it
 /// runs without a terminal (mise 2026.10 records the directory as trusted and
@@ -361,39 +371,36 @@ pub fn check_command_env(
     if expected.is_empty() && absent.is_empty() {
         return MiseDelivery::Delivered;
     }
-    let ask = |flags: bool| {
-        let mut args: Vec<OsString> = vec!["exec".into()];
-        if flags {
-            args.extend(PROBE_FLAGS.map(OsString::from));
-        }
-        args.extend(["--", "sh", "-c", PROBE, "sh"].map(OsString::from));
-        args.extend(
-            expected
-                .keys()
-                .copied()
-                .chain(absent.iter().copied())
-                .map(OsString::from),
-        );
-        run_invocation(
-            worktree,
-            timeout,
-            mise,
-            &Invocation {
-                args,
-                hook_env: Some((phase, env)),
-                forced_env: &FORCED_ENV,
-            },
-        )
-    };
-    let mut result = ask(true);
-    // A mise from before one of those flags: ask again without them.
+    let mut args: Vec<OsString> = vec!["exec".into()];
+    args.extend(PROBE_FLAGS.map(OsString::from));
+    args.extend(["--", "sh", "-c", PROBE, "sh"].map(OsString::from));
+    args.extend(
+        expected
+            .keys()
+            .copied()
+            .chain(absent.iter().copied())
+            .map(OsString::from),
+    );
+    let result = run_invocation(
+        worktree,
+        timeout,
+        mise,
+        &Invocation {
+            args,
+            hook_env: Some((phase, env)),
+            forced_env: &FORCED_ENV,
+        },
+    );
+    // A mise that refuses one of the flags is older than the pin: say so, with
+    // its release, instead of asking again with a check that prepares
+    // dependencies or answers from a cache.
     if let Ok(output) = &result
         && !output.success
         && PROBE_FLAGS
             .iter()
             .any(|flag| String::from_utf8_lossy(&output.stderr).contains(flag))
     {
-        result = ask(false);
+        return refused_flag(worktree, timeout, mise);
     }
     let output = match answer(result, "mise exec", timeout, worktree) {
         Ok(output) => output,
@@ -456,6 +463,40 @@ pub fn check_workspace_env(
 ) -> anyhow::Result<MiseDelivery> {
     let env = ChildEnv::from_file(worktree)?;
     Ok(check_command_env(worktree, &env, phase, timeout, mise))
+}
+
+/// What a mise that refused a flag of the check is: asked for its release and
+/// judged against the pin. A mise at or past the pin that still refuses the
+/// flag is a change in mise devflow has not met, reported as a failed check.
+fn refused_flag(worktree: &Path, timeout: Duration, mise: &MiseCommand) -> MiseDelivery {
+    let asked = run_invocation(
+        worktree,
+        timeout,
+        mise,
+        &Invocation {
+            args: vec!["--version".into()],
+            hook_env: None,
+            forced_env: &[],
+        },
+    );
+    match asked {
+        Ok(output) if output.success => {
+            match tools::judge(Tool::Mise, &String::from_utf8_lossy(&output.stdout)) {
+                Err(problem) => MiseDelivery::Unsupported { problem },
+                Ok(_) => MiseDelivery::Failed {
+                    reason: format!(
+                        "this mise refuses an option of `mise exec` that devflow passes ({})",
+                        PROBE_FLAGS.join(", ")
+                    ),
+                },
+            }
+        }
+        // It ran `exec` far enough to complain about a flag: whatever it is,
+        // devflow cannot read its release, and that is the problem to report.
+        _ => MiseDelivery::Unsupported {
+            problem: ToolProblem::new(Tool::Mise, Reason::Unreadable),
+        },
+    }
 }
 
 /// Variables the checks set whatever the hook gets: no tool is installed.
@@ -1510,7 +1551,7 @@ mod runtime {
     }
 
     #[test]
-    fn the_probe_is_not_confused_by_what_mise_prints_and_asks_older_mises_again() {
+    fn the_probe_is_not_confused_by_what_mise_prints_and_names_an_unsupported_mise() {
         let dir = tempfile::tempdir().unwrap();
         worktree_with_env(dir.path());
         let vars = probe_vars(&[("DATABASE_URL", DB)]);
@@ -1521,13 +1562,60 @@ mod runtime {
             &[],
         );
         assert_eq!(probe_at(dir.path(), &vars, &noisy), MiseDelivery::Delivered);
-        // A mise from before `--no-deps` refuses the flag; the probe asks again without it.
-        let old = stand_in(
-            dir.path(),
-            "[ \"$1\" = env ] && { echo '{}'; exit 0; }\nfor a in \"$@\"; do [ \"$a\" = --no-deps ] && { echo \"error: unexpected argument '--no-deps' found\" >&2; exit 2; }; done\nshift; while [ \"$1\" != -- ]; do shift; done; shift\nexec \"$@\"\n",
-            &[],
+        // A mise from before `--no-deps` refuses the flag. It is not asked again
+        // without it (a check that prepares dependencies is not the check):
+        // its release is read and judged against the pin.
+        let refuses = |version_line: &str| {
+            stand_in(
+                dir.path(),
+                &format!(
+                    "[ \"$1\" = env ] && {{ echo '{{}}'; exit 0; }}\n{version_line}\nfor a in \"$@\"; do [ \"$a\" = --no-deps ] && {{ echo \"error: unexpected argument '--no-deps' found\" >&2; exit 2; }}; done\nshift; while [ \"$1\" != -- ]; do shift; done; shift\nexec \"$@\"\n"
+                ),
+                &[],
+            )
+        };
+        let old = refuses(
+            "[ \"$1\" = --version ] && { echo '2026.3.1 macos-arm64 (2026-03-02)'; exit 0; }",
         );
-        assert_eq!(probe_at(dir.path(), &vars, &old), MiseDelivery::Delivered);
+        match probe_at(dir.path(), &vars, &old) {
+            MiseDelivery::Unsupported { problem } => {
+                assert_eq!(problem.tool, Tool::Mise);
+                assert_eq!(
+                    problem.reason,
+                    Reason::TooOld {
+                        found: tools::Version::new(2026, 3, 1)
+                    }
+                );
+                assert!(problem.message().contains("older than 2026.4.18"));
+                assert!(
+                    problem
+                        .remedies()
+                        .iter()
+                        .any(|r| matches!(r, crate::remedy::Remedy::OpenGuide { .. }))
+                );
+            }
+            other => panic!("expected Unsupported, got {other:?}"),
+        }
+        // One whose release cannot be read is unsupported too ...
+        let unreadable = refuses("[ \"$1\" = --version ] && { echo 'dev build'; exit 0; }");
+        assert!(matches!(
+            probe_at(dir.path(), &vars, &unreadable),
+            MiseDelivery::Unsupported {
+                problem: ToolProblem {
+                    reason: Reason::Unreadable,
+                    ..
+                }
+            }
+        ));
+        // ... and a current mise that refuses the flag is a failed check, not a
+        // mise to upgrade.
+        let changed = refuses(
+            "[ \"$1\" = --version ] && { echo '2026.10.7 macos-arm64 (2026-10-09)'; exit 0; }",
+        );
+        assert!(matches!(
+            probe_at(dir.path(), &vars, &changed),
+            MiseDelivery::Failed { .. }
+        ));
         // Not a mise that ran the check.
         let silent = stand_in(dir.path(), "exit 0\n", &[]);
         assert!(matches!(

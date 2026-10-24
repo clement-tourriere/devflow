@@ -70,7 +70,7 @@ fn malformed_services_are_refused_precisely() {
     let cases = [
         (
             "unsupported-engine.toml",
-            "unsupported engine (supported: postgres, valkey, redis, mysql)",
+            "unsupported engine (supported: postgres, valkey, redis, mysql, sqlite)",
         ),
         ("missing-engine.toml", "no `engine`"),
         ("unknown-field.toml", "immage"),

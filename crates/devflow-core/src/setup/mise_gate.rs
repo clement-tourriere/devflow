@@ -51,6 +51,9 @@ use std::path::Path;
 pub struct Verdict {
     /// Why no hook may run; the phase needs attention until it is resolved.
     pub block: Option<String>,
+    /// What fixes the block when it is not the project's configuration (an
+    /// unsupported mise: the page to upgrade it); empty otherwise.
+    pub remedies: Vec<Remedy>,
     /// Things worth saying that do not stop the hooks.
     pub warnings: Vec<String>,
     /// The check was skipped on request (`--skip-mise-check`).
@@ -102,7 +105,8 @@ fn names(hooks: &[&HookMise]) -> String {
 /// the person asked not to (`--skip-mise-check`).
 ///
 /// - `Delivered`: the hooks run.
-/// - `Overridden`, `Removed`, `Untrusted`, `Failed`: no hook runs.
+/// - `Overridden`, `Removed`, `Untrusted`, `Unsupported`, `Failed`: no hook
+///   runs.
 /// - `Unavailable`: no hook runs, since one of them needs mise.
 ///
 /// Whether mise trusts the configuration is asked for every hook that runs
@@ -215,6 +219,19 @@ pub fn check(
                 delivery.describe()
             });
         }
+        MiseDelivery::Unsupported { problem } => {
+            verdict.block = Some(if guided(phase) {
+                format!(
+                    "{}. No hook ran; upgrade mise, then {}{}",
+                    problem.message(),
+                    then(phase),
+                    instead(phase)
+                )
+            } else {
+                problem.message()
+            });
+            verdict.remedies = problem.remedies();
+        }
         MiseDelivery::Unavailable => {
             verdict.block = Some(if guided(phase) {
                 format!(
@@ -255,6 +272,7 @@ pub(super) fn check_phase(
     // hooks are started with it. One that names a workspace that cannot be
     // resolved is a block like any other (hooks started with it would be
     // refused too), with its own remedy.
+    let project = &*project.at(&workspace.path);
     let env = match super::workspace_env(project, workspace, receipt, true).child() {
         Ok(env) => env,
         Err(stale) => {
@@ -273,12 +291,15 @@ pub(super) fn check_phase(
         skip,
         &MiseCommand::default(),
     );
-    let remedies = if verdict.block.is_some() {
+    let remedies = if verdict.block.is_none() {
+        Vec::new()
+    } else if verdict.remedies.is_empty() {
         vec![Remedy::OpenFile {
             path: project.config_path.clone(),
         }]
     } else {
-        Vec::new()
+        // Not the project's configuration that is at fault: the tool is.
+        verdict.remedies.clone()
     };
     Ok((verdict, remedies))
 }

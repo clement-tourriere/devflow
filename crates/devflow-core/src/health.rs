@@ -152,6 +152,7 @@ pub fn check_root(root: &Path, registered: Option<(Uuid, &str)>) -> Health {
         }
     }
 
+    crate::project::accept_git_extensions();
     match git2::Repository::open(root) {
         Ok(repo) if repo.is_bare() => {
             return problem(

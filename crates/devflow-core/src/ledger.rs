@@ -35,10 +35,16 @@
 //! **Locks.** Every record has its own lock (`<instance id>.lock`, held for one
 //! read-modify-write and never across a call into a backend). The order is the
 //! documented one with the record lock last: process lock, receipt lock, record
-//! lock. A removal of a workspace that no longer has a receipt (nothing to lock
-//! in the Git directory) holds a removal lock (`<instance id>.removal.lock`)
-//! for the whole removal instead, which is not the record's lock, so its journal
-//! writes do not wait for themselves.
+//! lock. An operation that provisions or removes what the record names holds the
+//! instance lock (`<instance id>.op.lock`, [`try_instance_lock`]) for the whole
+//! operation: setup across its provisioning, a removal across its effects. It
+//! lives beside the record, in the common Git directory, not in the worktree's
+//! administrative directory, which Git deletes with the worktree: that is what
+//! lets a clean-up of a workspace with no receipt (nothing left to lock in the
+//! Git directory) tell that a setup is still creating what the record lists. It
+//! is only ever tried, never waited for, so it cannot take part in a cycle, and
+//! it is not the record's lock, so the journal writes under it do not wait for
+//! themselves.
 use crate::config::Engine;
 use crate::receipt::Receipt;
 use anyhow::{Context, Result, bail, ensure};
@@ -74,8 +80,8 @@ fn lock_path(common_dir: &Path, instance: Uuid) -> PathBuf {
     dir(common_dir).join(format!("{instance}.lock"))
 }
 
-fn removal_lock_path(common_dir: &Path, instance: Uuid) -> PathBuf {
-    dir(common_dir).join(format!("{instance}.removal.lock"))
+fn instance_lock_path(common_dir: &Path, instance: Uuid) -> PathBuf {
+    dir(common_dir).join(format!("{instance}.op.lock"))
 }
 
 /// Whether a workspace is being taken apart.
@@ -105,11 +111,95 @@ pub struct Checkout {
     pub identity: Option<String>,
 }
 
+/// How the repository a record was written for relates to the one that reads
+/// it now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Standing {
+    /// The very same directory (same identity), at whatever path it is at now.
+    SameDirectory,
+    /// Nothing proves it: another directory at the same path (a copy, a
+    /// restored backup, another machine's repository), a record that does not
+    /// say which directory it was written for, an identity this file system
+    /// does not give (on either side, or both: the same path then proves
+    /// nothing, since a copy has the same path), or another path with no
+    /// identity to show it is the same.
+    NotProven,
+}
+
+impl Checkout {
+    /// Whether `now` is the directory this record was written for. The path
+    /// alone proves nothing: a repository copied to another machine at the same
+    /// absolute path (Migration Assistant, a restored backup) keeps every
+    /// path and gets other directories, and on a file system that gives no
+    /// directory identity a copy cannot be told from the original at all. Two
+    /// identities must be there and equal; anything less is not proven, and
+    /// only the person's confirmation ([`Handle::rebind`], and on a file system
+    /// without identities the binding it leaves on this machine, see
+    /// [`bound_here`]) lets the record be acted on.
+    pub fn standing(&self, now: &Checkout) -> Standing {
+        match (&self.identity, &now.identity) {
+            (Some(was), Some(is)) if was == is => Standing::SameDirectory,
+            _ => Standing::NotProven,
+        }
+    }
+}
+
+/// Where this machine remembers that the person confirmed a record belongs to
+/// the repository at a path, for a file system that gives no directory
+/// identity: a copy of the repository (and of its records) made elsewhere
+/// carries nothing of it, since it is not in the repository. `None` without a
+/// data directory.
+fn binding_path(project: Uuid, instance: Uuid) -> Option<PathBuf> {
+    crate::paths::data_dir().ok().map(|data| {
+        data.join("record-bindings")
+            .join(project.to_string())
+            .join(format!("{instance}.json"))
+    })
+}
+
+/// The person confirmed on this machine that the record of `instance` belongs
+/// to the repository whose common Git directory is `common_dir` (the only
+/// proof there is where the file system gives no identity). The binding names
+/// the path it was made for: another path is another repository.
+pub fn bound_here(project: Uuid, instance: Uuid, common_dir: &Path) -> bool {
+    let Some(file) = binding_path(project, instance) else {
+        return false;
+    };
+    let Ok(text) = std::fs::read_to_string(&file) else {
+        return false;
+    };
+    serde_json::from_str::<serde_json::Value>(&text)
+        .ok()
+        .and_then(|value| value.get("common_dir")?.as_str().map(PathBuf::from))
+        .is_some_and(|bound| bound == common_dir)
+}
+
+fn bind_here(project: Uuid, instance: Uuid, common_dir: &Path) -> Result<()> {
+    let file = binding_path(project, instance)
+        .context("this machine has no data directory to remember the confirmation in")?;
+    let text = serde_json::to_vec_pretty(&serde_json::json!({
+        "common_dir": common_dir,
+        "bound_at": Utc::now(),
+    }))?;
+    crate::fsutil::write_atomic(&file, &text, true)
+}
+
+/// Forget what [`bind_here`] remembered, once the record is gone.
+fn unbind_here(project: Uuid, instance: Uuid) {
+    if let Some(file) = binding_path(project, instance) {
+        let _ = std::fs::remove_file(file);
+    }
+}
+
 /// Which directory `common_dir` is, independently of where it is: its inode
 /// and when it was created. A directory that was moved keeps both; a copy, a
 /// restored backup or another machine's repository has others. `None` when the
 /// file system does not say (the identity then proves nothing).
 pub fn repository_identity(common_dir: &Path) -> Option<String> {
+    #[cfg(test)]
+    if NO_IDENTITY.with(|off| off.get()) {
+        return None;
+    }
     let meta = std::fs::metadata(common_dir).ok()?;
     let born = meta
         .created()
@@ -127,6 +217,12 @@ pub fn repository_identity(common_dir: &Path) -> Option<String> {
         let _ = born;
         None
     }
+}
+
+// Test seam: a file system that gives no directory identity.
+#[cfg(test)]
+thread_local! {
+    pub(crate) static NO_IDENTITY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// A data branch the workspace owns, by identity.
@@ -241,6 +337,11 @@ pub enum Effect {
         branches: Vec<Uuid>,
     },
     DeleteWorktree,
+    /// The person confirmed that the record belongs to this repository: it was
+    /// written for the one at `from` and nothing else proved it.
+    Rebind {
+        from: PathBuf,
+    },
 }
 
 impl Effect {
@@ -264,6 +365,12 @@ impl Effect {
                 format!("keep the data of {} branch(es)", branches.len())
             }
             Effect::DeleteWorktree => "delete the worktree".to_string(),
+            Effect::Rebind { from } => {
+                format!(
+                    "bind the record, written for {}, to this repository",
+                    from.display()
+                )
+            }
         }
     }
 }
@@ -365,7 +472,16 @@ impl Record {
     fn refresh(&mut self, cx: &Placement, receipt: &Receipt) {
         self.project_id = receipt.project_id;
         self.workspace = receipt.workspace.clone();
-        self.checkout = cx.checkout.clone();
+        match self.checkout.standing(&cx.checkout) {
+            Standing::SameDirectory => self.checkout = cx.checkout.clone(),
+            // Never replaced implicitly, not even a blank identity filled in:
+            // a receipt written in a copy of the repository (it is a copy of
+            // the original's, with the same instance) must not make the copy
+            // the record's owner, since the record's resources live on servers
+            // the original shares. `devflow gc --rebind`, which the person
+            // confirms, is the one way.
+            Standing::NotProven => {}
+        }
         self.worktree = cx.worktree.clone();
         self.admin_id = cx.admin_id.clone();
         self.fingerprint = cx.fingerprint.clone();
@@ -379,17 +495,19 @@ impl Record {
 
         let disowned = self.resources.disowned.clone();
         for (key, binding) in &receipt.services {
-            if let (true, Some(id)) = (binding.owned, binding.branch_id)
-                && !disowned.contains(&id)
+            // A file engine (sqlite) owns nothing outside the worktree: the
+            // file goes with it, so there is nothing to account for.
+            if let (true, Some(id)) = (
+                binding.owned && !binding.engine.is_file(),
+                binding.branch_id,
+            ) && !disowned.contains(&id)
             {
                 self.note_branch(Some(key), Some(binding.engine), id, false);
             }
         }
-        if let Some(pending) = receipt
-            .creating
-            .as_ref()
-            .filter(|pending| !disowned.contains(&pending.branch_id))
-        {
+        if let Some(pending) = receipt.creating.as_ref().filter(|pending| {
+            !pending.engine.is_some_and(Engine::is_file) && !disowned.contains(&pending.branch_id)
+        }) {
             // The backend the creation was begun on is the one recorded with
             // it; a creation from before that was recorded has none, and is
             // looked for in every backend. The configuration (or another
@@ -718,33 +836,69 @@ fn lock(common_dir: &Path, instance: Uuid) -> Result<RecordLock> {
     }
 }
 
-/// Held for the whole removal of a workspace that has no receipt to lock.
-pub struct RemovalLock {
+/// Held for the whole of an operation on a workspace instance that creates or
+/// removes what its record names (see the module documentation).
+pub struct InstanceLock {
     _file: std::fs::File,
 }
 
-/// The removal lock of `instance`, or `None` when another removal holds it.
-/// Retried briefly, like [`Receipt::lock_retrying`]: a lock is released when
-/// the last duplicate of its file descriptor closes, and a process another
-/// thread is spawning can hold one for a few milliseconds after the removal
-/// that held it is over.
-pub fn try_removal_lock(common_dir: &Path, instance: Uuid) -> Result<Option<RemovalLock>> {
-    let file = removal_lock_path(common_dir, instance);
-    let handle = open_lock(&file)?;
-    for attempt in 0..10 {
-        match handle.try_lock() {
-            Ok(()) => return Ok(Some(RemovalLock { _file: handle })),
-            Err(std::fs::TryLockError::WouldBlock) => {
-                if attempt < 9 {
-                    std::thread::sleep(Duration::from_millis(25));
+/// The instance lock of `instance`, or `None` when another operation on it
+/// holds it. Retried briefly: a lock is released when the last duplicate of its
+/// file descriptor closes, and a process another thread is spawning can hold
+/// one for a few milliseconds after the operation that held it is over.
+///
+/// The lock file is deleted with the record, so a lock taken on a file that
+/// was deleted meanwhile would exclude nobody: the file that was locked must
+/// still be the one at the path, or the lock is taken again.
+pub fn try_instance_lock(common_dir: &Path, instance: Uuid) -> Result<Option<InstanceLock>> {
+    let file = instance_lock_path(common_dir, instance);
+    for _ in 0..5 {
+        let handle = open_lock(&file)?;
+        let mut locked = false;
+        for attempt in 0..10 {
+            match handle.try_lock() {
+                Ok(()) => {
+                    locked = true;
+                    break;
+                }
+                Err(std::fs::TryLockError::WouldBlock) => {
+                    if attempt < 9 {
+                        std::thread::sleep(Duration::from_millis(25));
+                    }
+                }
+                Err(std::fs::TryLockError::Error(e)) => {
+                    return Err(e).with_context(|| format!("cannot lock {}", file.display()));
                 }
             }
-            Err(std::fs::TryLockError::Error(e)) => {
-                return Err(e).with_context(|| format!("cannot lock {}", file.display()));
-            }
+        }
+        if !locked {
+            return Ok(None);
+        }
+        if still_at(&handle, &file) {
+            return Ok(Some(InstanceLock { _file: handle }));
         }
     }
-    Ok(None)
+    bail!(
+        "the lock file {} keeps being replaced; try again in a moment",
+        file.display()
+    )
+}
+
+/// Whether `handle` is the file that is at `path` now.
+fn still_at(handle: &std::fs::File, path: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        match (handle.metadata(), std::fs::metadata(path)) {
+            (Ok(held), Ok(there)) => held.dev() == there.dev() && held.ino() == there.ino(),
+            _ => false,
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (handle, path);
+        true
+    }
 }
 
 /// Read, change and write the record of `instance` under its lock. `Ok(None)`
@@ -1008,9 +1162,10 @@ impl Handle {
             )
         })?;
         drop(_held);
+        unbind_here(record.project_id, self.instance);
         // The lock files are only ever useful beside a record.
         let _ = std::fs::remove_file(lock_path(&self.common_dir, self.instance));
-        let _ = std::fs::remove_file(removal_lock_path(&self.common_dir, self.instance));
+        let _ = std::fs::remove_file(instance_lock_path(&self.common_dir, self.instance));
         Ok(Finish::Deleted)
     }
 
@@ -1019,8 +1174,17 @@ impl Handle {
     /// which disowns what the old identity owned.
     pub fn forget(&self) -> Result<()> {
         let _held = lock(&self.common_dir, self.instance)?;
+        let project = read(&self.common_dir, self.instance)
+            .ok()
+            .flatten()
+            .map(|record| record.project_id);
         match std::fs::remove_file(path(&self.common_dir, self.instance)) {
-            Ok(()) => Ok(()),
+            Ok(()) => {
+                if let Some(project) = project {
+                    unbind_here(project, self.instance);
+                }
+                Ok(())
+            }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(e) => Err(e).with_context(|| {
                 format!(
@@ -1029,6 +1193,36 @@ impl Handle {
                 )
             }),
         }
+    }
+
+    /// Bind the record to `checkout`, which the person confirmed is the
+    /// repository it belongs to (a copy, a restored backup, an identity that
+    /// could not be proven). Refused unless the record still has the
+    /// `generation` they were shown. Journaled, so that the transfer of the
+    /// right to act on what the record names can be seen afterwards.
+    pub fn rebind(&self, checkout: Checkout, generation: &str) -> Result<Option<PathBuf>> {
+        update(&self.common_dir, self.instance, |record| {
+            ensure!(
+                record.generation() == generation,
+                "the record of workspace '{}' changed since it was shown",
+                record.workspace
+            );
+            let from = record.checkout.common_dir.clone();
+            // Where the file system gives the repository no identity, the
+            // record itself cannot show whose it is from now on (a copy of it
+            // would say the same): the confirmation is remembered on this
+            // machine, for this path, outside the repository.
+            if checkout.identity.is_none() {
+                bind_here(record.project_id, record.instance_id, &checkout.common_dir)?;
+            }
+            record.checkout = checkout;
+            record.push_journal(
+                Effect::Rebind { from: from.clone() },
+                Outcome::Done,
+                Some("confirmed by the person".to_string()),
+            );
+            Ok(from)
+        })
     }
 
     /// Refresh the worktree path and the checkout identity of a record that
@@ -1133,6 +1327,7 @@ mod tests {
             service: "cache".into(),
             branch_id: Uuid::from_u128(9),
             engine: None,
+            file: None,
         });
         receipt.save(&ws.git_dir).unwrap();
         crate::worktree::force_remove(&t.project, &ws).unwrap();
@@ -1156,6 +1351,43 @@ mod tests {
     }
 
     #[test]
+    fn a_sqlite_database_is_not_a_resource_the_record_lists() {
+        // The file is in the worktree and goes with it: no branch, no pending
+        // creation, nothing for gc to account for.
+        let t = repo(None);
+        let ws = workspace(&t, "file");
+        let mut receipt = receipt_of(&t, "file");
+        let id = Uuid::from_u128(21);
+        receipt.creating = Some(PendingBranch {
+            service: "app".into(),
+            branch_id: id,
+            engine: Some(Engine::Sqlite),
+            file: None,
+        });
+        receipt.services.insert(
+            "app".into(),
+            crate::receipt::ServiceBinding::sqlite(
+                id,
+                "db/app.sqlite3".into(),
+                "sqlite:///x".into(),
+                "workspace:main".into(),
+                true,
+                crate::receipt::CloneReport::default(),
+                None,
+            ),
+        );
+        receipt.save(&ws.git_dir).unwrap();
+        let record = read(&t.project.git_common_dir, receipt.instance_id)
+            .unwrap()
+            .unwrap();
+        assert!(
+            record.resources.branches.is_empty(),
+            "{:?}",
+            record.resources
+        );
+    }
+
+    #[test]
     fn what_the_record_lists_grows_with_the_receipt_and_a_pending_branch_is_bound_once() {
         let t = repo(None);
         let ws = workspace(&t, "grow");
@@ -1165,6 +1397,7 @@ mod tests {
             service: "cache".into(),
             branch_id: id,
             engine: Some(Engine::Valkey),
+            file: None,
         });
         receipt.save(&ws.git_dir).unwrap();
         let common = &t.project.git_common_dir;
@@ -1295,6 +1528,7 @@ mod tests {
             service: "cache".into(),
             branch_id: id,
             engine: Some(Engine::Valkey),
+            file: None,
         });
         receipt.processes = Some(ProcessRecord {
             started_at: Utc::now(),
@@ -1343,6 +1577,75 @@ mod tests {
         assert_eq!(handle.read().unwrap().unwrap().state, State::Removing);
         mark_active(&ws.git_dir, receipt.instance_id).unwrap();
         assert_eq!(handle.read().unwrap().unwrap().state, State::Active);
+    }
+
+    /// Git can remove the worktree's administrative directory at any moment,
+    /// also after the receipt writer checked it and wrote the record: the
+    /// write must fail, not bring the directory back and report success.
+    #[test]
+    fn a_receipt_write_never_brings_back_a_directory_git_removed_meanwhile() {
+        let t = repo(None);
+        let ws = workspace(&t, "vanishing");
+        let receipt = receipt_of(&t, "vanishing");
+        receipt.save(&ws.git_dir).unwrap();
+        assert!(Receipt::path(&ws.git_dir).is_file());
+
+        let git_dir = ws.git_dir.clone();
+        crate::receipt::AFTER_RECORD.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                std::fs::remove_dir_all(&git_dir).unwrap();
+            }));
+        });
+        let result = receipt.save(&ws.git_dir);
+        crate::receipt::AFTER_RECORD.with(|hook| *hook.borrow_mut() = None);
+
+        let error = result.expect_err("the worktree is gone: nothing was saved");
+        assert!(format!("{error:#}").contains("is gone"), "{error:#}");
+        assert!(
+            !ws.git_dir.exists(),
+            "the administrative directory stays removed"
+        );
+        // The same for the locks and the logs: nothing recreates it.
+        assert!(Receipt::try_lock(&ws.git_dir).is_err());
+        assert!(Receipt::try_process_lock(&ws.git_dir).is_err());
+        assert!(crate::receipt::logs_dir_in_existing(&ws.git_dir).is_err());
+        assert!(!ws.git_dir.exists());
+    }
+
+    #[test]
+    fn a_path_alone_proves_nothing_not_even_when_neither_side_has_an_identity() {
+        let at = |identity: Option<&str>, path: &str| Checkout {
+            main: "/shop".into(),
+            common_dir: path.into(),
+            identity: identity.map(str::to_string),
+        };
+        let here = at(Some("7:1"), "/shop/.git");
+        assert_eq!(here.standing(&here.clone()), Standing::SameDirectory);
+        // Moved: the same directory at another path.
+        assert_eq!(
+            at(Some("7:1"), "/old/.git").standing(&here),
+            Standing::SameDirectory
+        );
+        // A copy at the same path, and anything short of two equal identities.
+        assert_eq!(
+            at(Some("9:9"), "/shop/.git").standing(&here),
+            Standing::NotProven
+        );
+        assert_eq!(at(None, "/shop/.git").standing(&here), Standing::NotProven);
+        assert_eq!(
+            at(Some("7:1"), "/shop/.git").standing(&at(None, "/shop/.git")),
+            Standing::NotProven
+        );
+        // Neither side has one (a file system that gives none): the same path is
+        // what a copy has too.
+        assert_eq!(
+            at(None, "/shop/.git").standing(&at(None, "/shop/.git")),
+            Standing::NotProven
+        );
+        assert_eq!(
+            at(None, "/old/.git").standing(&at(None, "/shop/.git")),
+            Standing::NotProven
+        );
     }
 
     #[test]
@@ -1441,6 +1744,7 @@ mod tests {
             service: "cache".into(),
             branch_id: Uuid::from_u128(5),
             engine: None,
+            file: None,
         });
         receipt.save(&ws.git_dir).unwrap();
         let error = handle.begin(Some(&shown)).unwrap_err();
@@ -1457,16 +1761,16 @@ mod tests {
     fn two_removals_of_one_instance_cannot_hold_the_removal_lock_at_once() {
         let t = repo(None);
         let instance = Uuid::new_v4();
-        let first = try_removal_lock(&t.project.git_common_dir, instance).unwrap();
+        let first = try_instance_lock(&t.project.git_common_dir, instance).unwrap();
         assert!(first.is_some());
         assert!(
-            try_removal_lock(&t.project.git_common_dir, instance)
+            try_instance_lock(&t.project.git_common_dir, instance)
                 .unwrap()
                 .is_none()
         );
         drop(first);
         assert!(
-            try_removal_lock(&t.project.git_common_dir, instance)
+            try_instance_lock(&t.project.git_common_dir, instance)
                 .unwrap()
                 .is_some()
         );

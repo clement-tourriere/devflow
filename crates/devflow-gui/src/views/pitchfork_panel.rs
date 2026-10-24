@@ -63,17 +63,21 @@ pub fn problem_title(detection: &Detection) -> String {
         "pitchfork is on PATH but does not run".to_string()
     } else {
         format!(
-            "pitchfork {} lacks what devflow uses",
+            "pitchfork {} is not a release devflow supports",
             detection.version.as_deref().unwrap_or("")
         )
         .replace("  ", " ")
     }
 }
 
-/// What is missing, in a sentence.
+/// What is wrong, in a sentence.
 pub fn problem_body(detection: &Detection) -> String {
     let detail = if detection.installed {
-        format!("Missing: {}.", detection.missing_features.join(", "))
+        detection
+            .unsupported
+            .as_ref()
+            .map(|problem| format!("{}.", problem.message()))
+            .unwrap_or_default()
     } else {
         detection
             .problem

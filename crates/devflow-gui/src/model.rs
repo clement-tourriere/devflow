@@ -395,6 +395,9 @@ pub struct ProjectModel {
     pub services: ServicesModel,
     pub trust: Option<TrustState>,
     pub pitchfork: PitchforkModel,
+    /// Where the project's focus (the forwarder of a canonical port) stands.
+    /// `None` until it has been read, or when it could not be.
+    pub focus: Option<devflow_core::focus::Status>,
     pub config: Option<ConfigModel>,
     pub config_error: Option<String>,
     pub logs: LogsModel,
@@ -431,6 +434,7 @@ impl ProjectModel {
             services: ServicesModel::default(),
             trust: None,
             pitchfork: PitchforkModel::default(),
+            focus: None,
             config: None,
             config_error: None,
             logs: LogsModel::default(),
@@ -756,6 +760,10 @@ pub struct WorkspaceRow {
     pub drift: Option<String>,
     pub database: String,
     pub path: String,
+    /// Suspended by request: its containers and daemons are stopped.
+    pub suspended: bool,
+    /// Kept out of the idle suspension.
+    pub pinned: bool,
 }
 
 impl WorkspaceRow {
@@ -780,6 +788,11 @@ pub fn workspace_rows(list: &[WorkspaceStatus]) -> Vec<WorkspaceRow> {
             drift: ws.drift.as_ref().map(|drift| shown(&drift.describe())),
             database: database_label(ws),
             path: shorten_home(&ws.workspace.path),
+            suspended: ws
+                .receipt
+                .as_ref()
+                .is_some_and(|r| r.suspended_at.is_some()),
+            pinned: ws.receipt.as_ref().is_some_and(|r| r.pinned),
             workspace: ws.workspace.clone(),
         })
         .collect()
@@ -789,7 +802,16 @@ fn database_label(ws: &WorkspaceStatus) -> String {
     match ws.receipt.as_ref().and_then(|r| r.first_postgres()) {
         Some(data) if data.branch_id.is_none() => format!("{} (url)", data.database),
         Some(data) => data.database.clone(),
-        None => "none".into(),
+        // A project whose database is a SQLite file has one too: its path.
+        None => ws
+            .receipt
+            .as_ref()
+            .and_then(|r| {
+                r.services
+                    .values()
+                    .find(|b| b.engine.is_file() && !b.orphaned)
+            })
+            .map_or_else(|| "none".into(), |b| format!("{} (sqlite)", b.database)),
     }
 }
 
@@ -1102,6 +1124,7 @@ mod tests {
             busy,
             drift: None,
             env_file: None,
+            recipes: None,
         }
     }
 
@@ -1197,6 +1220,31 @@ mod tests {
     }
 
     #[test]
+    fn a_workspace_whose_database_is_a_file_is_not_listed_as_having_none() {
+        use devflow_core::receipt::CloneReport;
+        let mut receipt = Receipt::new(Uuid::new_v4(), "w", None);
+        receipt.services.insert(
+            "app".into(),
+            ServiceBinding::sqlite(
+                Uuid::new_v4(),
+                "db/app.sqlite3".into(),
+                "sqlite:///w/db/app.sqlite3".into(),
+                "empty".into(),
+                true,
+                CloneReport::default(),
+                None,
+            ),
+        );
+        let mut one = status("w", Some(receipt.clone()), Some(Status::Ready), false);
+        assert_eq!(database_label(&one), "db/app.sqlite3 (sqlite)");
+        // The configuration dropped the service: nothing to show for it.
+        receipt.services.get_mut("app").unwrap().orphaned = true;
+        one.receipt = Some(receipt);
+        assert_eq!(database_label(&one), "none");
+        assert_eq!(database_label(&status("bare", None, None, false)), "none");
+    }
+
+    #[test]
     fn branches_are_unattached_without_a_local_receipt() {
         let attached_id = Uuid::new_v4();
         let mut receipt = Receipt::new(Uuid::new_v4(), "w", None);
@@ -1289,6 +1337,7 @@ mod tests {
             busy: false,
             drift: None,
             env_file: None,
+            recipes: None,
         }];
         model.selected_workspace = Some("gone".into());
         model.fix_selected_workspace();
@@ -1315,6 +1364,7 @@ mod tests {
                 busy: false,
                 drift: None,
                 env_file: None,
+                recipes: None,
             })
             .collect();
         model.fix_selected_workspace();

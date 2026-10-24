@@ -63,7 +63,6 @@ impl Ctx<'_> {
             migrations_dirs: Vec::new(),
             config_files: Vec::new(),
             generated_outputs: Vec::new(),
-            offline_data: None,
             database: None,
             evidence: Vec::new(),
         }
@@ -678,9 +677,8 @@ fn sqlx(ctx: &Ctx, out: &mut Vec<MigrationFact>) {
     fact.config_files = ctx.files(&["sqlx.toml"]);
     fact.database = engine_from_features(project.rs.features("sqlx"));
     fact.evidence.extend(fact.migrations_dirs.clone());
-    fact.evidence.extend(offline.clone());
+    fact.evidence.extend(offline);
     fact.evidence.extend(dependency);
-    fact.offline_data = offline;
     out.push(fact);
 }
 

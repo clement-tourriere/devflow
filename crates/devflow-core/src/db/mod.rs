@@ -356,8 +356,10 @@ pub struct Server {
 impl Server {
     /// `None` when the project has no PostgreSQL service.
     pub fn for_project(project: &Project) -> Result<Option<Server>> {
+        // Services are the project's shared part: the main checkout's,
+        // whichever workspace the project was resolved for.
         let Some((key, settings)) = project
-            .config
+            .main_config()
             .postgres()
             .map(|(key, pg)| (key.to_string(), pg.clone()))
         else {

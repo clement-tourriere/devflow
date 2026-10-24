@@ -46,7 +46,9 @@ pub(super) fn checks_in(project: &Project, cwd: &Path, mise: &MiseCommand) -> Ve
     if !env_file::path(path).is_file() {
         return Vec::new();
     }
+    // The setup hooks this workspace runs (its own branch's).
     let commands = project
+        .at(path)
         .config
         .hooks
         .commands(HookPhase::Setup)
@@ -138,6 +140,12 @@ fn env_check(
             detail,
             "install: https://mise.jdx.dev (setup hooks that run mise cannot work without it)",
         ),
+        MiseDelivery::Unsupported { problem } => Check::warn(
+            "mise-env",
+            detail,
+            "upgrade mise (setup hooks that run it are not run until it is a supported release)",
+        )
+        .fixes(problem.remedies()),
         MiseDelivery::Failed { .. } => Check::warn(
             "mise-env",
             detail,

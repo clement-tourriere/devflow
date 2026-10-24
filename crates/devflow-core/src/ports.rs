@@ -175,6 +175,13 @@ impl Held {
     /// check could tell. It is an error naming the file, with the remedy to
     /// open it; nothing is set aside or rewritten.
     fn read(&self) -> std::result::Result<Ledger, crate::remedy::Problem> {
+        let mut ledger = self.read_unreconciled()?;
+        ledger.entries = reconcile(std::mem::take(&mut ledger.entries));
+        Ok(ledger)
+    }
+
+    /// The ledger as the file has it, entries nobody carries any more included.
+    fn read_unreconciled(&self) -> std::result::Result<Ledger, crate::remedy::Problem> {
         let unreadable = |why: String| {
             crate::remedy::Problem::new(format!(
                 "the port ledger {} cannot be read ({why}), so no port can be chosen safely:                  another workspace's reservation could be handed out again",
@@ -191,10 +198,7 @@ impl Held {
             }
             Err(error) => return Err(unreadable(error.to_string())),
         };
-        let mut ledger: Ledger =
-            serde_json::from_str(&text).map_err(|error| unreadable(error.to_string()))?;
-        ledger.entries = reconcile(std::mem::take(&mut ledger.entries));
-        Ok(ledger)
+        serde_json::from_str(&text).map_err(|error| unreadable(error.to_string()))
     }
 
     fn write(&self, ledger: &mut Ledger) -> Result<()> {
@@ -636,6 +640,29 @@ pub fn release_instance(project_id: Uuid, instance_id: Uuid) {
     if ledger.entries.len() != before {
         let _ = held.write(&mut ledger);
     }
+}
+
+/// Which of `ports` the workspace instance `instance_id` of `project_id`
+/// holds in the ledger, in the order given: one bounded look (a short wait for
+/// the machine-wide lock, one read of the file) and **no** reconciliation of
+/// the ledger with the repositories of the machine, which a validation that
+/// runs every couple of seconds must not cost. `None` when the ledger cannot
+/// be locked or read: unknown is not "no".
+pub fn holds_all(project_id: Uuid, instance_id: Uuid, ports: &[u16]) -> Option<Vec<bool>> {
+    let held = lock(Duration::from_millis(500)).ok()?;
+    let ledger = held.read_unreconciled().ok()?;
+    Some(
+        ports
+            .iter()
+            .map(|port| {
+                ledger.entries.iter().any(|entry| {
+                    entry.port == *port
+                        && entry.project_id == project_id
+                        && entry.instance_id == instance_id
+                })
+            })
+            .collect(),
+    )
 }
 
 /// The ports reserved on this machine: `(port, project, instance)`.

@@ -162,6 +162,27 @@ pub fn run_scoped(state: &Entity<AppState>, remedy: &Remedy, window: &mut Window
                 },
             );
         }
+        Remedy::UseDefaultRecipes { workspace } => {
+            let Some(found) = workspace_at(state, workspace, cx) else {
+                return refuse(window, cx, remedy, no_workspace);
+            };
+            // Core records the choice and sets the workspace up with the default
+            // workspace's recipes. What they then ask to run is reviewed first
+            // unless it is approved already; the person confirms there.
+            let (app, path) = (state.clone(), found.path.clone());
+            dialogs::with_trust_choosing(
+                state,
+                &path,
+                TrustPurpose::Setup,
+                true,
+                window,
+                cx,
+                move |trust, window, cx| {
+                    let found = found.clone();
+                    app.update(cx, |s, cx| s.use_default_recipes(found, trust, window, cx));
+                },
+            );
+        }
         Remedy::Trust { workspace } => {
             let Some(found) = workspace_at(state, workspace, cx) else {
                 return refuse(window, cx, remedy, no_workspace);
@@ -299,6 +320,57 @@ pub fn run_scoped(state: &Entity<AppState>, remedy: &Remedy, window: &mut Window
         Remedy::CleanUp { root } => {
             let root = root.clone();
             state.update(cx, |s, cx| s.open_cleanup(root, window, cx));
+        }
+        // Whose record it is, is the person's call: they are told what is
+        // known, and binding removes nothing.
+        Remedy::RebindRecord { root, instance } => {
+            let shown = state
+                .read(cx)
+                .selection
+                .current()
+                .filter(|model| model.entry.root == *root)
+                .and_then(|_| state.read(cx).cleanup.read())
+                .and_then(|inventory| inventory.entry(*instance))
+                .filter(|entry| entry.rebindable())
+                .and_then(|entry| Some((entry.target()?, entry.clone())));
+            let Some((target, entry)) = shown else {
+                return refuse(
+                    window,
+                    cx,
+                    remedy,
+                    "That record is not waiting to be bound any more. Look at the clean-up page \
+                     again.",
+                );
+            };
+            let written_for = match &entry.cause {
+                Some(devflow_core::gc::Cause::OtherCheckout { common_dir }) => {
+                    common_dir.display().to_string()
+                }
+                _ => "another repository".to_string(),
+            };
+            let app = state.clone();
+            open_confirm(
+                window,
+                cx,
+                "Bind this record to this repository",
+                vec![
+                    format!(
+                        "The record of {} was written for the repository at {}, and nothing \
+                         shows that it is this one.",
+                        crate::redaction::shown(&entry.workspace),
+                        crate::redaction::shown(&written_for)
+                    ),
+                    "Bind it only if it is yours and the repository it was written for no \
+                     longer uses what it names. It can then be cleaned up like any other, \
+                     which drops that data. Binding removes nothing."
+                        .to_string(),
+                ],
+                "Bind",
+                move |window, cx| {
+                    let target = target.clone();
+                    app.update(cx, |s, cx| s.rebind_cleanup(target, window, cx));
+                },
+            );
         }
         Remedy::RemoveWorkspace { root, name } => {
             let Some(found) = workspace_named(state, root, name, cx) else {

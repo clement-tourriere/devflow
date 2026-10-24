@@ -9,6 +9,7 @@ mod jobs;
 mod model;
 mod ops;
 mod ops_pitchfork;
+mod ops_rest;
 mod ops_services;
 mod redaction;
 mod services;

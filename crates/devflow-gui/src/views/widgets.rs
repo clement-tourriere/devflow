@@ -112,6 +112,17 @@ pub fn banner(
     action: Option<Button>,
     cx: &App,
 ) -> Div {
+    banner_with(tone, icon, text, action.into_iter().collect(), cx)
+}
+
+/// [`banner`] with several actions, in the order given (the most useful first).
+pub fn banner_with(
+    tone: Tone,
+    icon: Lucide,
+    text: impl Into<SharedString>,
+    actions: Vec<Button>,
+    cx: &App,
+) -> Div {
     let color = ui::tone_color(tone, cx);
     h_flex()
         .w_full()
@@ -125,7 +136,13 @@ pub fn banner(
         .bg(color.opacity(0.08))
         .child(Icon::new(icon).size_4().text_color(color))
         .child(div().flex_1().min_w_0().text_sm().child(text.into()))
-        .children(action.map(|button| button.small().into_any_element()))
+        .children((!actions.is_empty()).then(|| {
+            h_flex().gap_2().children(
+                actions
+                    .into_iter()
+                    .map(|button| button.small().into_any_element()),
+            )
+        }))
 }
 
 /// A quiet row of a list: the hover state every row shares.

@@ -160,9 +160,7 @@ fn finding_2_aliases_of_protected_files_are_never_read_as_text() {
     let facts = scan_dir(&repo);
 
     assert!(!json(&facts).contains("ALIAS_MUST_NOT_LEAK"), "{facts:#?}");
-    for version in &facts.toolchain.version_files {
-        assert_eq!(version.version, None, "{}", version.file);
-    }
+    // The pin files are listed by name and not opened at all.
     assert_eq!(facts.toolchain.version_files.len(), 5);
     assert!(facts.compose.is_none());
     assert!(facts.js.is_empty());
@@ -171,7 +169,7 @@ fn finding_2_aliases_of_protected_files_are_never_read_as_text() {
             .toolchain
             .mise
             .as_ref()
-            .is_none_or(|m| m.tools.is_empty() && m.tasks.is_empty() && m.env_files.is_empty())
+            .is_none_or(|m| m.tools.is_empty() && m.tasks.is_empty() && m.env_entries.is_empty())
     );
     assert!(facts.processes.is_empty());
     assert!(
@@ -184,7 +182,7 @@ fn finding_2_aliases_of_protected_files_are_never_read_as_text() {
 }
 
 #[test]
-fn finding_2_a_version_file_must_look_like_a_version() {
+fn finding_2_a_version_file_is_listed_and_its_text_is_never_read() {
     let repo = fixture(&[
         (".nvmrc", "postgresql://app:VERSION_MUST_NOT_LEAK@db/app\n"),
         (".python-version", "3.12.4\n"),
@@ -192,16 +190,10 @@ fn finding_2_a_version_file_must_look_like_a_version() {
     let facts = scan_dir(&repo);
 
     assert!(!json(&facts).contains("VERSION_MUST_NOT_LEAK"));
-    let version = |name: &str| {
-        facts
-            .toolchain
-            .version_files
-            .iter()
-            .find(|v| v.file == name)
-            .and_then(|v| v.version.clone())
-    };
-    assert_eq!(version(".nvmrc"), None);
-    assert_eq!(version(".python-version").as_deref(), Some("3.12.4"));
+    assert_eq!(
+        facts.toolchain.version_files,
+        vec![".nvmrc", ".python-version"]
+    );
 }
 
 // -- 3. git without libgit2 -------------------------------------------------------------
@@ -555,10 +547,6 @@ fn finding_6_text_inside_a_multiline_quoted_value_is_not_an_assignment() {
     assert!(!facts.env.has_key("REDIS_URL"));
     assert!(!facts.env.has_key("DB_HOST"));
     assert!(facts.env.has_key("POSTGRES_USER"));
-    assert_eq!(
-        facts.env.files[0].key_count, 3,
-        "SECRET, POSTGRES_USER, KEY"
-    );
 }
 
 #[test]
@@ -689,6 +677,5 @@ fn finding_8_a_file_of_many_names_is_capped_quickly() {
     let facts = scan_within(repo.path(), Duration::from_secs(30));
 
     assert!(started.elapsed() < Duration::from_secs(2));
-    assert_eq!(facts.env.files[0].key_count, 5000);
     assert!(has_warning(&facts, "only the first 5000 variable names"));
 }

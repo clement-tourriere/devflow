@@ -415,6 +415,7 @@ pub fn apply(migration: &Migration) -> Result<Vec<PathBuf>> {
         }
         Ok(written.iter().map(|file| file.path.clone()).collect())
     };
+    crate::project::accept_git_extensions();
     match git2::Repository::open(&migration.root) {
         Ok(repo) => {
             crate::fsutil::with_lock(&repo.commondir().join("devflow/config-edit.lock"), go)

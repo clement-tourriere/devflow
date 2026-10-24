@@ -1,14 +1,16 @@
 //! The Data tab: every data service the project configures. A card per
 //! service on top (PostgreSQL first, then the container engines: Valkey, Redis
-//! and whatever core adds), and below the one that is selected: PostgreSQL's
-//! server, branches and snapshots as before, or a container service's
-//! branches with their endpoints, snapshots and orphans.
+//! and whatever core adds, then the SQLite files), and below the one that is
+//! selected: PostgreSQL's server, branches and snapshots as before, a
+//! container service's branches with their endpoints, snapshots and orphans,
+//! or a SQLite service's database file in each workspace and its snapshots.
 use super::{
     activity_panel::ActivityPanel,
     database::DatabaseView,
     reading::Reading,
     service_dialogs,
     service_view::ServiceView,
+    sqlite_view::SqliteView,
     ui::{self, Tone},
     widgets::{card, chip},
 };
@@ -18,6 +20,7 @@ use crate::{
     services::{BranchState, ServiceDetail, ServiceTarget},
     state::AppState,
 };
+use devflow_core::config::Engine;
 use gpui_kit::{
     assets::IconName as Lucide,
     component::{
@@ -36,6 +39,9 @@ pub struct ServiceCard {
     pub key: String,
     pub engine: String,
     pub postgres: bool,
+    /// A database that is a file in each workspace (`sqlite`): nothing runs,
+    /// there are no branches, and `branches` counts the files that exist.
+    pub file: bool,
     /// `None` when they could not be counted (the catalog or the server could
     /// not be read): never zero.
     pub branches: Option<usize>,
@@ -43,6 +49,8 @@ pub struct ServiceCard {
     pub running: Running,
     pub snapshots: Option<usize>,
     pub unfinished: usize,
+    /// Snapshots whose file is gone or changed (SQLite).
+    pub damaged: usize,
     /// Branches no workspace owns.
     pub orphans: usize,
     /// A workspace's receipt could not be read, so `orphans` is not known.
@@ -155,11 +163,13 @@ pub fn cards(model: &ProjectModel) -> Vec<ServiceCard> {
             key,
             engine: "postgres".to_string(),
             postgres: true,
+            file: false,
             // An unreachable server lists nothing: that is not "none".
             branches: postgres_read.then_some(model.database.branches.len()),
             running: Running::NotRead,
             snapshots: postgres_read.then_some(model.database.snapshots.len()),
             unfinished: 0,
+            damaged: 0,
             orphans: 0,
             owners_unknown: false,
             server: Some(model.server_badge()),
@@ -176,10 +186,12 @@ pub fn cards(model: &ProjectModel) -> Vec<ServiceCard> {
             key: count.key.clone(),
             engine: count.engine.clone(),
             postgres: false,
+            file: false,
             branches: count.known.then_some(count.branches),
             running: Running::of(detail),
             snapshots: count.known.then_some(count.snapshots),
             unfinished: count.unfinished,
+            damaged: 0,
             orphans: model
                 .services
                 .orphans
@@ -192,20 +204,48 @@ pub fn cards(model: &ProjectModel) -> Vec<ServiceCard> {
             cow: detail.map(|d| super::service_view::cow_text(&d.cow)),
         });
     }
+    // The files come last: they have no server and no containers to order by.
+    for sqlite in &model.services.sqlite {
+        cards.push(ServiceCard {
+            key: sqlite.key.clone(),
+            engine: Engine::Sqlite.as_str().to_string(),
+            postgres: false,
+            file: true,
+            // An unreadable listing is unknown, never zero.
+            branches: sqlite.database_count(),
+            running: Running::NotRead,
+            snapshots: sqlite.snapshot_count(),
+            unfinished: sqlite.unfinished(),
+            damaged: sqlite.damaged(),
+            orphans: 0,
+            owners_unknown: false,
+            server: None,
+            cow: None,
+        });
+    }
     cards
 }
 
-/// "3 branches · 1 snapshot", or that they could not be counted.
+/// "3 branches · 1 snapshot" ("3 databases · 1 snapshot" for a SQLite file),
+/// or that they could not be counted.
 pub fn counts_text(card: &ServiceCard) -> String {
+    let (singular, plural) = if card.file {
+        ("1 database", "databases")
+    } else {
+        ("1 branch", "branches")
+    };
     let branches = match card.branches {
-        Some(1) => "1 branch".to_string(),
-        Some(n) => format!("{n} branches"),
-        None => "branches unavailable".to_string(),
+        Some(1) => singular.to_string(),
+        Some(n) => format!("{n} {plural}"),
+        None => format!("{plural} unavailable"),
     };
     let snapshots = match card.snapshots {
         Some(1) => " · 1 snapshot".to_string(),
         Some(n) => format!(" · {n} snapshots"),
-        None if card.branches.is_none() => String::new(),
+        // One catalog read counts a container service's branches and its
+        // snapshots: when it failed, once is enough. A SQLite service's
+        // files and snapshots are read separately.
+        None if card.branches.is_none() && !card.file => String::new(),
         None => " · snapshots unavailable".to_string(),
     };
     format!("{branches}{snapshots}")
@@ -215,6 +255,7 @@ pub struct DataView {
     state: Entity<AppState>,
     database: Entity<DatabaseView>,
     service: Entity<ServiceView>,
+    sqlite: Entity<SqliteView>,
     activity: Entity<ActivityPanel>,
     _subscription: Subscription,
 }
@@ -225,6 +266,7 @@ impl DataView {
         Self {
             database: cx.new(|cx| DatabaseView::new(state.clone(), window, cx)),
             service: cx.new(|cx| ServiceView::new(state.clone(), cx)),
+            sqlite: cx.new(|cx| SqliteView::new(state.clone(), cx)),
             activity: cx.new(|cx| ActivityPanel::new(state.clone(), window, cx)),
             state,
             _subscription: subscription,
@@ -247,6 +289,15 @@ impl DataView {
                 running_word(running, &reading),
                 reading.tone(running),
                 running_help(&reading),
+            )
+            .into_any_element(),
+            // A file has no server and no containers: say so where the other
+            // cards say whether something runs.
+            (None, None) if card.file => ui::pill(
+                "service-card-file",
+                "file",
+                Tone::Neutral,
+                "A SQLite database is a file in each workspace: nothing runs, so there is no server to start and no port to reach.",
             )
             .into_any_element(),
             (None, None) => div().into_any_element(),
@@ -284,6 +335,8 @@ impl DataView {
                     .child(
                         Icon::new(if card.postgres {
                             Lucide::Database
+                        } else if card.file {
+                            Lucide::File
                         } else {
                             Lucide::Layers
                         })
@@ -306,13 +359,16 @@ impl DataView {
                 ),
             )
             .when(
-                card.unfinished > 0 || card.orphans > 0 || card.owners_unknown,
+                card.unfinished > 0 || card.damaged > 0 || card.orphans > 0 || card.owners_unknown,
                 |col| {
                     col.child(
                         h_flex()
                             .gap_1()
                             .children((card.unfinished > 0).then(|| {
                                 chip(format!("{} unfinished", card.unfinished), Tone::Warning, cx)
+                            }))
+                            .children((card.damaged > 0).then(|| {
+                                chip(format!("{} damaged", card.damaged), Tone::Warning, cx)
                             }))
                             .children((card.orphans > 0).then(|| {
                                 chip(format!("{} orphan", card.orphans), Tone::Warning, cx)
@@ -349,7 +405,7 @@ impl Render for DataView {
             return ui::empty_state(
                 Lucide::Database,
                 "No data service is configured",
-                "Add a postgres, valkey or redis service ([services.NAME], engine = \"valkey\") to devflow.toml to give every workspace its own copy-on-write data.",
+                "Add a postgres, valkey, redis, mysql or sqlite service ([services.NAME], engine = \"valkey\") to devflow.toml to give every workspace its own copy-on-write data.",
                 Some(
                     Button::new("open-config")
                         .primary()
@@ -361,10 +417,9 @@ impl Render for DataView {
             )
             .into_any_element();
         }
-        let postgres_selected = cards
-            .iter()
-            .find(|c| Some(&c.key) == selected.as_ref())
-            .is_some_and(|c| c.postgres);
+        let selected_card = cards.iter().find(|c| Some(&c.key) == selected.as_ref());
+        let postgres_selected = selected_card.is_some_and(|c| c.postgres);
+        let file_selected = selected_card.is_some_and(|c| c.file);
         let strip = h_flex()
             .id("service-cards")
             .px_4()
@@ -424,6 +479,8 @@ impl Render for DataView {
             }))
             .child(div().flex_1().min_h_0().child(if postgres_selected {
                 self.database.clone().into_any_element()
+            } else if file_selected {
+                self.sqlite.clone().into_any_element()
             } else {
                 self.service.clone().into_any_element()
             }))

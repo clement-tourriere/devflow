@@ -73,11 +73,15 @@ struct Named {
 /// Every branch `receipt` names that this workspace may own, the configured
 /// postgres service's first.
 fn named(project: &Project, receipt: &Receipt) -> Vec<Named> {
-    let primary = project.config.postgres().map(|(key, _)| key);
+    // Services are the project's shared part: the main checkout's, whichever
+    // workspace the project was resolved for.
+    let primary = project.main_config().postgres().map(|(key, _)| key);
     let mut all: Vec<Named> = receipt
         .services
         .iter()
-        .filter(|(_, binding)| binding.owned)
+        // A sqlite database is a file in the worktree and goes with it: there
+        // is nothing outside to account for.
+        .filter(|(_, binding)| binding.owned && !binding.engine.is_file())
         .filter_map(|(key, binding)| {
             Some(Named {
                 what: format!("service '{key}'"),
@@ -93,7 +97,10 @@ fn named(project: &Project, receipt: &Receipt) -> Vec<Named> {
     // service's configuration is not where to look: it may have changed since
     // (`db` was a PostgreSQL service and is a Valkey one now). A record from
     // before the engine was written has none, and is looked for everywhere.
-    if let Some(pending) = &receipt.creating
+    if let Some(pending) = receipt
+        .creating
+        .as_ref()
+        .filter(|p| !p.engine.is_some_and(Engine::is_file))
         && let Some(id) = recoverable(receipt, &pending.service)
     {
         all.push(Named {
@@ -864,6 +871,7 @@ mod tests {
             service: "db".into(),
             branch_id: db,
             engine: Some(Engine::Postgres),
+            file: None,
         });
         let found = named(&project, &receipt);
         assert_eq!(found.len(), 1, "{found:?}");
@@ -876,6 +884,7 @@ mod tests {
             service: "cache".into(),
             branch_id: cache,
             engine: Some(Engine::Valkey),
+            file: None,
         });
         let found = named(&project, &receipt);
         assert_eq!(found.len(), 1, "{found:?}");
@@ -895,6 +904,7 @@ mod tests {
             service: "db".into(),
             branch_id: Uuid::new_v4(),
             engine: Some(Engine::Postgres),
+            file: None,
         });
         assert_eq!(named(&project, &receipt)[0].engine, Some(Engine::Postgres));
         // A record from before the engine was recorded has none, whatever the
@@ -903,6 +913,7 @@ mod tests {
             service: "db".into(),
             branch_id: Uuid::new_v4(),
             engine: None,
+            file: None,
         });
         let found = named(&project, &receipt);
         assert_eq!((found[0].engine, found[0].pending), (None, true));
@@ -917,6 +928,7 @@ mod tests {
             service: "db".into(),
             branch_id: id,
             engine: Some(Engine::Postgres),
+            file: None,
         });
         // Its credentials were recorded: the binding has it, once.
         receipt.services.insert("db".into(), pg_binding(id, true));
@@ -1034,6 +1046,7 @@ mod tests {
             service: "db".into(),
             branch_id: id,
             engine: Some(Engine::Postgres),
+            file: None,
         });
         let workspace = workspace_of(&project, &receipt);
         for force in [false, true] {
@@ -1114,6 +1127,7 @@ mod tests {
                 service: "db".into(),
                 branch_id: id,
                 engine,
+                file: None,
             });
             let workspace = workspace_of(&project, &receipt);
             for force in [false, true] {
@@ -1151,6 +1165,7 @@ mod tests {
             service: "db".into(),
             branch_id: id,
             engine: Some(Engine::Postgres),
+            file: None,
         });
         let workspace = workspace_of(&project, &receipt);
         let mut warnings = Vec::new();

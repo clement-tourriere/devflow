@@ -44,6 +44,20 @@ pub fn describe(scope: &Scope) -> String {
     redact::text(&lines.join("\n"))
 }
 
+/// The review of `scope`, judged at `dir`: where it comes from, then what it
+/// covers.
+fn review(project: &Project, dir: &Path, scope: &Scope) -> String {
+    format!(
+        "{}\n{}",
+        sources(project, dir)
+            .iter()
+            .map(|line| format!("# {line}"))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        describe(scope)
+    )
+}
+
 /// Why the question is asked.
 fn reason(previously_trusted: bool, format_changed: bool) -> &'static str {
     if format_changed {
@@ -55,10 +69,33 @@ fn reason(previously_trusted: bool, format_changed: bool) -> &'static str {
     }
 }
 
-/// Whether setting up a workspace executes or applies anything an approval
-/// governs: setup commands (`hooks`), or `[env]` recipes and presets.
-pub fn governs_setup(project: &Project, hooks: bool) -> bool {
+/// Whether setting up the workspace at `dir` (or, for a new one, the workspace
+/// it is made from) executes or applies anything an approval governs: setup
+/// commands (`hooks`), or `[env]` recipes and presets, which are the
+/// workspace's own (see `devflow_core::effective`).
+pub fn governs_setup(project: &Project, dir: &Path, hooks: bool) -> bool {
+    let project = project.at(dir);
     !project.config.env.is_empty() || (hooks && !project.config.hooks.setup.is_empty())
+}
+
+/// Where the parts of the scope judged at `dir` come from, one line each, for
+/// the review: the recipes (hooks, `[env]`, copy list) and the pitchfork files
+/// are the workspace's, the project's services and the rest are the main
+/// checkout's.
+pub fn sources(project: &Project, dir: &Path) -> Vec<String> {
+    let project = project.at(dir);
+    let effective = project.effective();
+    let mut lines = vec![
+        format!("judged at {}", dir.display()),
+        format!("hooks and [env] come from {}", effective.recipes.describe()),
+        format!(
+            "pitchfork processes come from the pitchfork files in {}",
+            dir.display()
+        ),
+    ];
+    lines.extend(effective.warnings());
+    lines.extend(effective.ignored_local_warning());
+    lines
 }
 
 enum Choice {
@@ -132,7 +169,7 @@ pub fn resolve(
     output::note(format!(
         "{} The hooks run shell commands as you:\n{}",
         reason(previously_trusted, format_changed),
-        describe(&scope)
+        review(project, target, &scope)
     ));
     let options = vec![Choice::TrustAndRun, Choice::RunOnce, Choice::Skip];
     match inquire::Select::new("Run with this scope?", options).prompt() {
@@ -153,11 +190,15 @@ pub fn resolve(
 
 #[derive(Args)]
 pub struct TrustArgs {
-    /// Withdraw approval of this project's hooks, [env] and pitchfork processes
-    #[arg(long)]
+    /// Withdraw the approval of this workspace's scope (its hooks, [env] and
+    /// pitchfork processes as they are now); the project's other approvals stand
+    #[arg(long, conflicts_with = "revoke_all")]
     pub revoke: bool,
+    /// Withdraw every approval of this project, whatever workspace made it
+    #[arg(long)]
+    pub revoke_all: bool,
     /// Approve without asking
-    #[arg(short = 'y', long, conflicts_with = "revoke")]
+    #[arg(short = 'y', long, conflicts_with_all = ["revoke", "revoke_all"])]
     pub yes: bool,
 }
 
@@ -166,20 +207,47 @@ pub fn command(ctx: &Ctx, args: TrustArgs) -> Result<ExitCode> {
     let project = ctx.project()?;
     let target = current_target(ctx, &project);
     let scope = trust::scope_at(&project, &target);
-    if args.revoke {
-        let revoked = trust::revoke(&project)?;
+    if args.revoke_all {
+        let count = trust::revoke_all(&project)?;
         if ctx.json {
             output::emit(
                 ctx,
                 "trust",
-                &json!({ "project": ProjectInfo::of(&project), "revoked": revoked }),
+                &json!({
+                    "project": ProjectInfo::of(&project),
+                    "revoked": count > 0,
+                    "revoked_count": count,
+                }),
+            )?;
+        } else if count > 0 {
+            output::say(format!(
+                "Revoked every approval of this project ({count} in all)."
+            ));
+        } else {
+            output::say("This project had no approvals.");
+        }
+        return Ok(ExitCode::SUCCESS);
+    }
+    if args.revoke {
+        let revoked = trust::revoke_at(&project, &target)?;
+        if ctx.json {
+            output::emit(
+                ctx,
+                "trust",
+                &json!({
+                    "project": ProjectInfo::of(&project),
+                    "path": target,
+                    "revoked": revoked,
+                    "recipes": project.at(&target).effective().report(None),
+                }),
             )?;
         } else if revoked {
             output::say(
-                "Revoked the approval of this project's hooks, [env] and pitchfork processes.",
+                "Revoked the approval of this workspace's hooks, [env] and pitchfork processes; \
+                 the project's other approvals stand.",
             );
         } else {
-            output::say("This project's scope was not approved.");
+            output::say("This workspace's scope was not approved.");
         }
         return Ok(ExitCode::SUCCESS);
     }
@@ -191,7 +259,7 @@ pub fn command(ctx: &Ctx, args: TrustArgs) -> Result<ExitCode> {
         let approve = if args.yes {
             true
         } else if ctx.interactive() {
-            output::say(describe(&scope));
+            output::say(review(&project, &target, &scope));
             shown = true;
             match inquire::Confirm::new("Trust all of this?")
                 .with_default(false)
@@ -219,6 +287,10 @@ pub fn command(ctx: &Ctx, args: TrustArgs) -> Result<ExitCode> {
             "path": target,
             "trust": state,
             "approved": approved,
+            // Where each part of what was judged comes from.
+            "recipes": project.at(&target).effective().report(None),
+            // Every digest approved for this project (any workspace's), oldest first.
+            "approvals": trust::approvals(&project)?,
             // The same scope, with credential-named `[env]` variables masked
             // like `env list` does; the digest is the real one.
             "scope": scope.review_json(),
@@ -232,7 +304,7 @@ pub fn command(ctx: &Ctx, args: TrustArgs) -> Result<ExitCode> {
         ),
         TrustState::Trusted => {
             if !shown {
-                output::say(describe(&scope));
+                output::say(review(&project, &target, &scope));
             }
             output::say(if approved {
                 "Approved."
@@ -246,7 +318,7 @@ pub fn command(ctx: &Ctx, args: TrustArgs) -> Result<ExitCode> {
             ..
         } => {
             if !shown {
-                output::say(describe(&scope));
+                output::say(review(&project, &target, &scope));
             }
             output::say(format!(
                 "This scope is not trusted. {}",
@@ -349,16 +421,16 @@ mod tests {
         let (c, _keep_c) = project("[env]\nA = \"1\"\n");
         let open = |p: &std::path::PathBuf| Project::open(p).unwrap();
         assert!(
-            !governs_setup(&open(&a), true),
+            !governs_setup(&open(&a), &a, true),
             "teardown and switch are not setup"
         );
-        assert!(governs_setup(&open(&b), true));
+        assert!(governs_setup(&open(&b), &b, true));
         assert!(
-            !governs_setup(&open(&b), false),
+            !governs_setup(&open(&b), &b, false),
             "--no-hooks leaves nothing"
         );
         assert!(
-            governs_setup(&open(&c), false),
+            governs_setup(&open(&c), &c, false),
             "[env] applies without hooks"
         );
     }

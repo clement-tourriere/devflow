@@ -2102,8 +2102,9 @@ impl Render for HooksEditorView {
                 div()
                     .text_xs()
                     .text_color(ui::muted(cx))
+                    .id("setup-footer")
                     .child(format!(
-                        "Editing {path}. A hook is a string until it needs a name or a timeout. Changing what runs asks you to approve it again.",
+                        "Editing {path}, the main checkout's file. Every other workspace carries its own copy of it with its branch and runs that one: a change here reaches a branch once it is committed there. A hook is a string until it needs a name or a timeout. Changing what runs asks you to approve it again.",
                     )),
             )
             .test_support()

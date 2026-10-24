@@ -1,6 +1,6 @@
 # Remote data hosts
 
-Run PostgreSQL once, on a machine that stays up, and let code run elsewhere: laptops, local VM forks (for example Cove), or cloud sandboxes and microVMs. Each workspace still gets its own database branch, cloned in seconds on the data host. This page covers the setup. The design is in the [plan](plans/2026-10-10-devflow-1.0.md#remote-data-hosts).
+Run PostgreSQL once, on a machine that stays up, and let code run elsewhere: laptops, local VM forks (for example Cove), or cloud sandboxes and microVMs. Each workspace still gets its own database branch, cloned in seconds on the data host. This page covers the setup. The design is in the [plan](../plans/2026-10-10-devflow-1.0.md#remote-data-hosts).
 
 ```
               trusted                                       untrusted

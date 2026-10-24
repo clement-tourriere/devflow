@@ -1,11 +1,15 @@
 //! Serializable result types of a repository scan.
 //!
+//! A fact is here because something reads it: a proposal (`propose`), the
+//! setup wizard's "what we found" chips, or the check that a plan's inputs did
+//! not change (`apply`). Add a fact together with its reader, and remove it with
+//! the last one.
+//!
 //! Every detected fact carries `evidence`: the files (and, after a colon, the
 //! keys) that support it, relative to the scanned root, e.g. `bun.lock` or
 //! `package.json:dependencies.next`. Paths are always `/`-separated and
 //! relative to the scan root; `"."` is the root itself.
 use serde::Serialize;
-use std::path::PathBuf;
 
 /// Everything [`super::scan`] learned about a repository.
 ///
@@ -14,8 +18,6 @@ use std::path::PathBuf;
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub struct Facts {
-    /// Canonical absolute path of the scanned directory.
-    pub root: PathBuf,
     /// Git status of the scanned directory.
     pub git: GitFacts,
     /// mise and language version files.
@@ -64,46 +66,9 @@ pub struct GitFacts {
 }
 
 impl Facts {
-    /// The JavaScript project at the repository root, or the first one found.
-    pub fn js_project(&self) -> Option<&JsProject> {
-        self.js
-            .iter()
-            .find(|p| p.path == ".")
-            .or_else(|| self.js.first())
-    }
-
-    /// The idempotent dependency install command for the main JavaScript
-    /// project's package manager (see [`PackageManagerFact::install_command`]).
-    pub fn js_install_command(&self) -> Option<&'static str> {
-        self.js_project()
-            .map(|p| p.package_manager.install_command())
-    }
-
-    /// The install command of every JavaScript project, with its directory.
-    pub fn js_install_commands(&self) -> Vec<(&str, &'static str)> {
-        self.js
-            .iter()
-            .map(|p| (p.path.as_str(), p.package_manager.install_command()))
-            .collect()
-    }
-
-    /// The environment install command of the main Python project, if its tool has a safe one.
-    pub fn python_install_command(&self) -> Option<&'static str> {
-        self.python
-            .iter()
-            .find(|p| p.path == ".")
-            .or_else(|| self.python.first())
-            .and_then(PythonProject::install_command)
-    }
-
     /// Whether `framework` was detected anywhere.
     pub fn has_framework(&self, framework: Framework) -> bool {
         self.frameworks.iter().any(|f| f.framework == framework)
-    }
-
-    /// Whether `tool` was detected anywhere.
-    pub fn has_migration_tool(&self, tool: MigrationTool) -> bool {
-        self.migrations.iter().any(|m| m.tool == tool)
     }
 
     /// Compose services running `engine`.
@@ -113,14 +78,6 @@ impl Facts {
             .flat_map(|c| &c.services)
             .filter(|s| s.engine == engine)
             .collect()
-    }
-
-    /// Whether mise defines a task called `name`.
-    pub fn has_mise_task(&self, name: &str) -> bool {
-        self.toolchain
-            .mise
-            .as_ref()
-            .is_some_and(|m| m.tasks.iter().any(|t| t == name))
     }
 }
 
@@ -132,8 +89,8 @@ impl Facts {
 pub struct ToolchainFacts {
     /// mise configuration, if any.
     pub mise: Option<MiseFacts>,
-    /// Language version files such as `.nvmrc`.
-    pub version_files: Vec<VersionFile>,
+    /// Language version files such as `.nvmrc`, by file name.
+    pub version_files: Vec<String>,
 }
 
 /// mise configuration found at the root.
@@ -149,12 +106,10 @@ pub struct MiseFacts {
     pub tools: Vec<String>,
     /// Task names (`[tasks.*]` and file tasks), sorted.
     pub tasks: Vec<String>,
-    /// Every path listed under `[env] _.file` / `_.source`, as written, in
-    /// the order mise applies them (layer by layer, then as listed) with
-    /// repeated entries kept: the same file listed twice is applied twice,
-    /// and the later one wins.
-    pub env_files: Vec<String>,
-    /// The same entries with the file and directive they come from.
+    /// Every path listed under `[env] _.file` / `_.source`, as written, with
+    /// the file and directive it comes from, in the order mise applies them
+    /// (layer by layer, then as listed) with repeated entries kept: the same
+    /// file listed twice is applied twice, and the later one wins.
     pub env_entries: Vec<MiseEnvEntry>,
     /// Supporting files and keys.
     pub evidence: Vec<String>,
@@ -202,18 +157,6 @@ impl MiseFacts {
     }
 }
 
-/// A language version pin outside mise.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub struct VersionFile {
-    /// File name; this is also the evidence.
-    pub file: String,
-    /// Tool the file pins: `node`, `python`, `ruby` or `rust`.
-    pub tool: String,
-    /// First meaningful value (`22`, `3.12`, `stable`, ...), when readable.
-    pub version: Option<String>,
-}
-
 // -- JavaScript -------------------------------------------------------------
 
 /// A JavaScript package manager.
@@ -230,36 +173,17 @@ pub enum PackageManager {
     Bun,
 }
 
-/// How the package manager was determined, strongest first.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PackageManagerSource {
-    /// The `packageManager` field of `package.json`.
-    PackageManagerField,
-    /// `devEngines.packageManager` in `package.json`.
-    DevEngines,
-    /// A lockfile.
-    Lockfile,
-    /// A tool-specific configuration file (`pnpm-workspace.yaml`, `.yarnrc.yml`, `bunfig.toml`).
-    ConfigFile,
-    /// Taken from the enclosing project (the repository root) because this one has no signal.
-    Inherited,
-    /// No signal at all; npm is the default guess.
-    Assumed,
-}
-
 /// The package manager of one JavaScript project.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub struct PackageManagerFact {
     /// Which tool.
     pub kind: PackageManager,
-    /// Version from `packageManager`, when pinned.
-    pub version: Option<String>,
     /// Yarn 2+ (berry); always false for other tools.
     pub yarn_berry: bool,
-    /// Why this tool was chosen.
-    pub source: PackageManagerSource,
+    /// No signal at all (no `packageManager` field, lockfile, tool configuration
+    /// or enclosing project): npm is the default guess.
+    pub assumed: bool,
     /// This tool's lockfile in the project directory (`pnpm-lock.yaml`,
     /// `apps/web/bun.lock`), when there is one. A lockfile of another tool
     /// does not count: it cannot satisfy a frozen install.
@@ -305,58 +229,12 @@ impl PackageManagerFact {
     }
 }
 
-/// Where workspace globs were declared.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum WorkspaceSource {
-    /// `workspaces` in `package.json` (npm, yarn, bun).
-    PackageJson,
-    /// `pnpm-workspace.yaml`.
-    PnpmWorkspaceYaml,
-}
-
-/// A JavaScript workspace declaration.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub struct WorkspaceFacts {
-    /// Where the globs came from.
-    pub source: WorkspaceSource,
-    /// The globs as written (negations included).
-    pub patterns: Vec<String>,
-    /// Supporting files and keys.
-    pub evidence: Vec<String>,
-}
-
-/// A monorepo orchestrator.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum MonorepoTool {
-    /// Turborepo.
-    Turbo,
-    /// Nx.
-    Nx,
-    /// Lerna.
-    Lerna,
-}
-
-/// A detected monorepo orchestrator.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub struct MonorepoToolFact {
-    /// Which tool.
-    pub tool: MonorepoTool,
-    /// Supporting files and keys.
-    pub evidence: Vec<String>,
-}
-
 /// One `package.json` and what matters about it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub struct JsPackage {
     /// Directory relative to the scan root.
     pub path: String,
-    /// The `name` field.
-    pub name: Option<String>,
     /// Script names, sorted. Script bodies are not retained.
     pub scripts: Vec<String>,
     /// Scripts whose body mentions `prisma generate`.
@@ -392,10 +270,9 @@ pub struct JsProject {
     pub path: String,
     /// The package manager that installs this project.
     pub package_manager: PackageManagerFact,
-    /// Workspace declaration, for monorepos.
-    pub workspaces: Option<WorkspaceFacts>,
-    /// Turbo, Nx or Lerna.
-    pub monorepo_tools: Vec<MonorepoToolFact>,
+    /// Declares workspaces (`workspaces` in `package.json`, or
+    /// `pnpm-workspace.yaml`): its member packages follow in `packages`.
+    pub workspaces: bool,
     /// The project's own package first (when it has a `package.json`), then workspace members.
     pub packages: Vec<JsPackage>,
     /// Supporting files and keys.
@@ -424,8 +301,6 @@ pub struct PythonProject {
     pub path: String,
     /// The tool that creates its environment.
     pub tool: PythonTool,
-    /// The `requirements*.txt` files, for pip.
-    pub requirements_files: Vec<String>,
     /// The tool's lockfile in the project directory (`uv.lock`,
     /// `poetry.lock`), when there is one.
     pub lockfile: Option<String>,
@@ -553,26 +428,6 @@ pub enum Engine {
     Other,
 }
 
-impl Engine {
-    /// Whether the engine stores application data (as opposed to mail sinks,
-    /// brokers and emulators).
-    pub fn is_datastore(self) -> bool {
-        matches!(
-            self,
-            Engine::Postgres
-                | Engine::Mysql
-                | Engine::Mariadb
-                | Engine::Redis
-                | Engine::Valkey
-                | Engine::Memcached
-                | Engine::Mongodb
-                | Engine::Clickhouse
-                | Engine::Sqlite
-                | Engine::SqlServer
-        )
-    }
-}
-
 /// An ORM or schema-migration tool.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -629,8 +484,6 @@ pub struct MigrationFact {
     pub config_files: Vec<String>,
     /// Generated code directories inside the repository (the Prisma client `output`).
     pub generated_outputs: Vec<String>,
-    /// Offline query data (`.sqlx`), which lets builds run without a database.
-    pub offline_data: Option<String>,
     /// The engine the tool is configured for, when it says so.
     pub database: Option<Engine>,
     /// Supporting files and keys.
@@ -650,10 +503,6 @@ impl MigrationFact {
 pub struct DriverFact {
     /// Engine the library talks to.
     pub engine: Engine,
-    /// Directory relative to the scan root.
-    pub path: String,
-    /// Dependency name.
-    pub dependency: String,
     /// Supporting files and keys.
     pub evidence: Vec<String>,
 }
@@ -666,10 +515,6 @@ pub struct DriverFact {
 pub struct ComposeFacts {
     /// The file that was parsed.
     pub file: String,
-    /// Every compose file name present at the root.
-    pub files: Vec<String>,
-    /// Top-level `name:`.
-    pub project_name: Option<String>,
     /// Services, sorted by name.
     pub services: Vec<ComposeService>,
     /// Top-level `volumes:` definitions, sorted by key.
@@ -679,8 +524,6 @@ pub struct ComposeFacts {
     /// elsewhere (`include:`, an override file): then a volume may be shared
     /// in a way these facts do not show.
     pub volumes_complete: bool,
-    /// Supporting files and keys.
-    pub evidence: Vec<String>,
 }
 
 /// A top-level compose volume.
@@ -742,16 +585,10 @@ pub struct ComposeService {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub struct PublishedPort {
-    /// Bind address, when given.
-    pub host_ip: Option<String>,
     /// Host port; `None` when Docker picks one or it comes from an unset variable.
     pub host: Option<u16>,
-    /// Name of the variable that sets the host port, when it has no default.
-    pub host_variable: Option<String>,
     /// Container port.
     pub container: u16,
-    /// `tcp` or `udp`.
-    pub protocol: String,
 }
 
 /// A volume or bind mount.
@@ -768,7 +605,8 @@ pub struct VolumeMount {
 
 // -- env --------------------------------------------------------------------
 
-/// What kind of setting an environment variable name looks like.
+/// What kind of setting an environment variable name looks like: the kinds a
+/// proposal acts on. Everything else is [`EnvCategory::Other`] and not reported.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EnvCategory {
@@ -782,38 +620,10 @@ pub enum EnvCategory {
     Database,
     /// `REDIS_*`, `VALKEY_*`, `CACHE_URL`.
     Redis,
-    /// `MONGODB_*`, `MONGO_*`.
-    Mongo,
-    /// `CLICKHOUSE_*`.
-    Clickhouse,
-    /// `S3_*`, `MINIO_*`, `AWS_S3_*`.
-    ObjectStorage,
-    /// `RABBITMQ_*`, `AMQP_*`, `KAFKA_*`.
-    Broker,
-    /// `ELASTICSEARCH_*`, `OPENSEARCH_*`, `MEILI*`.
-    Search,
-    /// `SMTP_*`, `MAIL_*`.
-    Mail,
     /// `PORT` and `*_PORT`: fixed ports collide between simultaneous worktrees.
     Port,
     /// Anything else. These names are not reported in [`EnvFacts::keys`].
     Other,
-}
-
-impl EnvCategory {
-    /// Whether the name suggests a database or cache connection.
-    pub fn is_datastore(self) -> bool {
-        matches!(
-            self,
-            EnvCategory::DatabaseUrl
-                | EnvCategory::Postgres
-                | EnvCategory::Mysql
-                | EnvCategory::Database
-                | EnvCategory::Redis
-                | EnvCategory::Mongo
-                | EnvCategory::Clickhouse
-        )
-    }
 }
 
 /// A variable name found in one or more `.env*` files.
@@ -828,33 +638,18 @@ pub struct EnvKey {
     pub files: Vec<String>,
 }
 
-/// One `.env*` file.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub struct EnvFile {
-    /// Path relative to the root.
-    pub path: String,
-    /// Number of variables it defines.
-    pub key_count: usize,
-    /// It defines at least one database-looking name.
-    pub has_database_keys: bool,
-}
-
 /// `.env*` files and the variable names they define.
 ///
 /// Only names are read; values are never stored.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub struct EnvFacts {
-    /// The files read: the root's first, then project directories'; by name within a directory.
-    pub files: Vec<EnvFile>,
-    /// Infrastructure-looking names (everything except [`EnvCategory::Other`]),
-    /// each with the files that define it, sorted by name.
+    /// The files read, relative to the root: the root's first, then project
+    /// directories'; by name within a directory.
+    pub files: Vec<String>,
+    /// Names of the kinds a proposal acts on (everything except
+    /// [`EnvCategory::Other`]), each with the files that define it, sorted by name.
     pub keys: Vec<EnvKey>,
-    /// Any file contains a database-looking name.
-    pub has_database_keys: bool,
-    /// Supporting files.
-    pub evidence: Vec<String>,
 }
 
 impl EnvFacts {
@@ -967,23 +762,14 @@ pub(crate) fn shell_quote(word: &str) -> String {
 
 /// A process that is part of working on the project.
 ///
-/// Only [`ProcessFact::display`] is meant to be shown to a person; only
-/// [`ProcessFact::launch`] is meant to be turned into a command.
+/// Only [`ProcessFact::launch`] is meant to be turned into a command.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub struct ProcessFact {
     /// Name (Procfile entry, script name, task name, daemon name).
     pub name: String,
-    /// What to show a person: the shell rendering of an argument vector
-    /// (script and task names only, never script bodies), or
-    /// `<file>: <process>` for a Procfile entry, whose command line is never
-    /// copied into the facts. Control characters escaped, credentials masked
-    /// ([`crate::redact::text`]), clipped. Safe to show and to serialize;
-    /// **not** safe to execute. `None` when only the name is known (pitchfork
+    /// How to start the process. `None` when only the name is known (pitchfork
     /// daemons).
-    pub display: Option<String>,
-    /// How to start the process; the executable counterpart of `display`.
-    /// `None` when only the name is known.
     pub launch: Option<ProcessLaunch>,
     /// Directory relative to the scan root.
     pub cwd: String,
@@ -1075,26 +861,14 @@ impl ArtifactFact {
 
 // -- wiring -----------------------------------------------------------------
 
-/// A daemon in `pitchfork.toml`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub struct PitchforkDaemon {
-    /// Daemon name (`[daemons.NAME]`).
-    pub name: String,
-    /// `mise = true` is set for this daemon.
-    pub mise: bool,
-}
-
 /// `pitchfork.toml`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub struct PitchforkFacts {
     /// The file read.
     pub file: String,
-    /// Daemons, sorted by name.
-    pub daemons: Vec<PitchforkDaemon>,
-    /// Every daemon runs under mise (`mise = true`), so mise's `[env]` reaches it.
-    pub all_daemons_use_mise: bool,
+    /// Daemon names, sorted.
+    pub daemons: Vec<String>,
     /// Supporting files and keys.
     pub evidence: Vec<String>,
 }
@@ -1132,6 +906,4 @@ pub struct WiringFacts {
     /// override it only when that `MISE_ENV` is selected, which a scan of the
     /// repository cannot tell.
     pub mise_env_overridden_when_selected: Vec<MiseEnvEntry>,
-    /// Supporting files and keys.
-    pub evidence: Vec<String>,
 }

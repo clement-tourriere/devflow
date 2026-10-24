@@ -95,6 +95,53 @@ impl AppState {
         cx.notify();
     }
 
+    /// Bind a record to this repository (after the confirmation): the person
+    /// said it is theirs. A job like the removal, followed by a new read of the
+    /// inventory; it removes nothing.
+    pub fn rebind_cleanup(
+        &mut self,
+        target: gc::Target,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.start_job(
+            "Bind a record to this repository".into(),
+            true,
+            FailureHint::None,
+            window,
+            cx,
+            move |project, progress| {
+                let request = gc::RebindRequest {
+                    targets: vec![target],
+                };
+                let outcome = gc::rebind(&project, &request, &mut |line| progress.output(line))?;
+                let mut warnings = Vec::new();
+                for skipped in &outcome.skipped {
+                    warnings.push(format!(
+                        "kept {}: {}",
+                        skipped.workspace.as_deref().unwrap_or("a record"),
+                        skipped.reason
+                    ));
+                }
+                let names: Vec<&str> = outcome
+                    .rebound
+                    .iter()
+                    .map(|rebound| rebound.workspace.as_str())
+                    .collect();
+                Ok(Done {
+                    summary: if names.is_empty() {
+                        "Nothing was bound".to_string()
+                    } else {
+                        format!("Bound {} to this repository", names.join(", "))
+                    },
+                    needs_attention: !warnings.is_empty(),
+                    warnings,
+                    ..Done::default()
+                })
+            },
+        );
+    }
+
     /// Remove the instances picked (after the confirmation): a job, so it is
     /// shown as an activity and finished by a new read of the inventory.
     pub fn remove_cleanup(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -124,6 +171,9 @@ impl AppState {
                     }
                     for line in &removed.dropped {
                         progress.output(&format!("{}: {line}", removed.workspace));
+                    }
+                    if let Some(released) = &removed.released_focus {
+                        progress.output(&format!("{}: {}", removed.workspace, released.describe()));
                     }
                 }
                 for skipped in &outcome.skipped {

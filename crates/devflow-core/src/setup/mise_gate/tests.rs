@@ -596,3 +596,91 @@ fn a_check_that_fails_blocks_without_quoting_mise() {
     );
     assert!(!block.contains("stderr-secret"), "{block}");
 }
+
+/// A stand-in for a mise from before `--no-deps` (2026.4.18): it trusts the
+/// configuration, prints `version` for `--version` and refuses the flag.
+fn old_mise(f: &Fixture, version: &str) -> MiseCommand {
+    let script = f.root.parent().unwrap().join("old-mise.sh");
+    std::fs::write(
+        &script,
+        format!(
+            "case \"$1\" in env) echo '{{}}'; exit 0;; --version) echo '{version}'; exit 0;; \
+             exec) for a in \"$@\"; do case \"$a\" in --no-deps) \
+             echo \"error: unexpected argument '--no-deps' found\" >&2; exit 2;; esac; done;; esac\n\
+             exit 64\n"
+        ),
+    )
+    .unwrap();
+    MiseCommand {
+        program: "/bin/sh".into(),
+        leading_args: vec![script.into_os_string()],
+        ..MiseCommand::default()
+    }
+}
+
+#[test]
+fn a_mise_older_than_the_pin_blocks_the_hooks_that_run_it_and_names_its_upgrade_page() {
+    let f = Fixture::new();
+    let mise = old_mise(&f, "2026.3.1 macos-arm64 (2026-03-02)");
+    for phase in [HookPhase::Setup, HookPhase::Switch, HookPhase::Teardown] {
+        let verdict = check(
+            &f.root,
+            phase,
+            &[hook("mise exec -- npm ci")],
+            &ChildEnv::plain(f.vars.clone()),
+            false,
+            &mise,
+        );
+        let block = verdict.block.expect("blocked");
+        assert!(
+            block.contains("mise 2026.3.1 is older than 2026.4.18"),
+            "{phase:?}: {block}"
+        );
+        assert!(!block.contains("npm ci"), "no command text: {block}");
+        // Setup's reason says what to do next, as it always has; the others
+        // are shown by frontends that draw the remedy instead.
+        assert_eq!(
+            block.contains("upgrade mise"),
+            phase == HookPhase::Setup,
+            "{phase:?}: {block}"
+        );
+        assert!(
+            verdict
+                .remedies
+                .iter()
+                .any(|r| matches!(r, Remedy::OpenGuide { url } if url.contains("mise.jdx.dev"))),
+            "{phase:?}: {:?}",
+            verdict.remedies
+        );
+    }
+    // A hook that does not run mise does not care which mise there is.
+    assert!(f.check(&[hook("echo hi")], false, &mise).block.is_none());
+    // Asking to skip the check runs the hooks, as for any other refusal.
+    let skipped = f.check(&[hook("mise exec -- npm ci")], true, &mise);
+    assert!(skipped.block.is_none() && skipped.skipped);
+}
+
+#[test]
+fn a_mise_whose_release_cannot_be_read_is_unsupported_too() {
+    let f = Fixture::new();
+    let mise = old_mise(&f, "a development build");
+    let verdict = f.check(&[hook("mise exec -- npm ci")], false, &mise);
+    let block = verdict.block.expect("blocked");
+    assert!(block.contains("cannot be read"), "{block}");
+    assert!(block.contains("2026.4.18 or later"), "{block}");
+}
+
+#[test]
+fn a_current_mise_is_asked_for_nothing_but_the_check() {
+    // The common case costs no extra question: `--version` is only asked of a
+    // mise that refused a flag.
+    let f = Fixture::new();
+    let mise = f.mise("true");
+    assert!(
+        f.check(&[hook("mise exec -- npm ci")], false, &mise)
+            .block
+            .is_none()
+    );
+    let asked = f.asked();
+    assert!(asked.iter().all(|a| a == "env" || a == "exec"), "{asked:?}");
+}

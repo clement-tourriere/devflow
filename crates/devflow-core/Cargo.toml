@@ -38,9 +38,15 @@ sha1_smol = "1.0"
 humantime = "2.2"
 percent-encoding = "2.3"
 rayon = "1.12"
+# SQLite's own backup API takes the consistent snapshot of a workspace's database file (the `sqlite` engine). `bundled` compiles the amalgamation in, so no libsqlite3 or `sqlite3` binary is needed at run time; the C compiler libgit2 already needs builds it.
+rusqlite = { version = "0.40", default-features = false, features = ["bundled", "backup"] }
+# The JSON Schema of devflow.toml (`devflow config schema`) is derived from the configuration types, so it cannot drift from what the parser accepts. Already in the lockfile through GPUI; `uuid1` gives `project.id` its `uuid` format.
+schemars = { version = "1.2", features = ["uuid1"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
 [dev-dependencies]
 tempfile.workspace = true
+# Validates the shipped examples and the fixtures against the generated schema, and checks that configurations the parser refuses are refused by the schema. Tests only; no HTTP or file resolvers.
+jsonschema = { version = "0.33", default-features = false }

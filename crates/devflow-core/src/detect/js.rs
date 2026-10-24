@@ -1,9 +1,6 @@
 //! JavaScript package managers, workspaces and packages.
-use super::facts::{
-    JsPackage, JsProject, MonorepoTool, MonorepoToolFact, PackageManager, PackageManagerFact,
-    PackageManagerSource, WorkspaceFacts, WorkspaceSource,
-};
-use super::manifest::{Discovery, JsManifest, Project};
+use super::facts::{JsPackage, JsProject, PackageManager, PackageManagerFact};
+use super::manifest::{Discovery, JsManifest, Project, WorkspaceSource};
 use super::push_unique;
 use super::repo::Repo;
 
@@ -34,8 +31,7 @@ pub(super) fn detect(repo: &Repo, discovery: &Discovery) -> Vec<JsProject> {
         out.push(JsProject {
             path: project.path.clone(),
             package_manager,
-            workspaces: None,
-            monorepo_tools: monorepo_tools(project),
+            workspaces: false,
             packages: package_of(project, false).into_iter().collect(),
             evidence: project.js.iter().map(|m| m.file.clone()).collect(),
         });
@@ -56,25 +52,20 @@ fn root_project(
             packages.push(package);
         }
     }
-    let workspaces = discovery.js_workspace.as_ref().map(|decl| WorkspaceFacts {
-        source: decl.source,
-        patterns: decl.patterns.clone(),
-        evidence: vec![match decl.source {
-            WorkspaceSource::PackageJson => "package.json:workspaces".to_string(),
-            WorkspaceSource::PnpmWorkspaceYaml => "pnpm-workspace.yaml:packages".to_string(),
-        }],
-    });
     let mut evidence: Vec<String> = root.js.iter().map(|m| m.file.clone()).collect();
-    if let Some(w) = &workspaces {
-        for e in &w.evidence {
-            push_unique(&mut evidence, e.clone());
-        }
+    if let Some(decl) = &discovery.js_workspace {
+        push_unique(
+            &mut evidence,
+            match decl.source {
+                WorkspaceSource::PackageJson => "package.json:workspaces",
+                WorkspaceSource::PnpmWorkspaceYaml => "pnpm-workspace.yaml:packages",
+            },
+        );
     }
     JsProject {
         path: ".".to_string(),
         package_manager,
-        workspaces,
-        monorepo_tools: monorepo_tools(root),
+        workspaces: discovery.js_workspace.is_some(),
         packages,
         evidence,
     }
@@ -91,42 +82,11 @@ fn package_of(project: &Project, workspace_member: bool) -> Option<JsPackage> {
         .collect();
     Some(JsPackage {
         path: project.path.clone(),
-        name: manifest.name.clone(),
         scripts,
         prisma_generate_scripts,
         workspace_member,
         evidence: vec![manifest.file.clone()],
     })
-}
-
-fn monorepo_tools(project: &Project) -> Vec<MonorepoToolFact> {
-    let mut out = Vec::new();
-    let tools: [(MonorepoTool, &[&str], &[&str]); 3] = [
-        (
-            MonorepoTool::Turbo,
-            &["turbo.json", "turbo.jsonc"],
-            &["turbo"],
-        ),
-        (MonorepoTool::Nx, &["nx.json"], &["nx", "@nrwl/workspace"]),
-        (MonorepoTool::Lerna, &["lerna.json"], &["lerna"]),
-    ];
-    for (tool, files, deps) in tools {
-        let mut evidence = Vec::new();
-        for file in files {
-            if project.has_file(file) {
-                evidence.push(project.file(file));
-            }
-        }
-        for dep in deps {
-            if let Some(e) = project.js_deps.evidence(dep) {
-                evidence.push(e);
-            }
-        }
-        if !evidence.is_empty() {
-            out.push(MonorepoToolFact { tool, evidence });
-        }
-    }
-    out
 }
 
 /// The package manager that installs `project`, with its own lockfile (a
@@ -154,16 +114,11 @@ fn choose_package_manager(
 
     // 1. Explicit pins win over anything on disk.
     if let Some(m) = manifest {
-        for (value, key, source) in [
-            (
-                m.package_manager.as_deref(),
-                "packageManager",
-                PackageManagerSource::PackageManagerField,
-            ),
+        for (value, key) in [
+            (m.package_manager.as_deref(), "packageManager"),
             (
                 m.dev_engines_package_manager.as_deref(),
                 "devEngines.packageManager",
-                PackageManagerSource::DevEngines,
             ),
         ] {
             if let Some((kind, version)) = value.and_then(parse_pin) {
@@ -172,9 +127,8 @@ fn choose_package_manager(
                     && (major.is_some_and(|m| m >= 2) || (major.is_none() && berry_files));
                 return PackageManagerFact {
                     kind,
-                    version,
                     yarn_berry,
-                    source,
+                    assumed: false,
                     lockfile: None,
                     evidence: vec![format!("{}:{key}", m.file)],
                 };
@@ -217,9 +171,8 @@ fn choose_package_manager(
         };
         return PackageManagerFact {
             kind,
-            version: None,
             yarn_berry,
-            source: PackageManagerSource::Lockfile,
+            assumed: false,
             lockfile: None,
             evidence,
         };
@@ -234,9 +187,8 @@ fn choose_package_manager(
         if project.has_file(file) {
             return PackageManagerFact {
                 kind,
-                version: None,
                 yarn_berry: kind == PackageManager::Yarn,
-                source: PackageManagerSource::ConfigFile,
+                assumed: false,
                 lockfile: None,
                 evidence: vec![project.file(file)],
             };
@@ -246,15 +198,14 @@ fn choose_package_manager(
     // 4. Inherit from the repository root, else guess npm.
     if let Some(parent) = inherit {
         return PackageManagerFact {
-            source: PackageManagerSource::Inherited,
+            assumed: false,
             ..parent.clone()
         };
     }
     PackageManagerFact {
         kind: PackageManager::Npm,
-        version: None,
         yarn_berry: false,
-        source: PackageManagerSource::Assumed,
+        assumed: true,
         lockfile: None,
         evidence: manifest.iter().map(|m| m.file.clone()).collect(),
     }

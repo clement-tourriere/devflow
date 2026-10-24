@@ -42,7 +42,6 @@ fn project(project: &Project) -> Option<PythonProject> {
     Some(PythonProject {
         path: project.path.clone(),
         tool,
-        requirements_files,
         lockfile: project.has_file(lockfile).then(|| project.file(lockfile)),
         evidence,
     })

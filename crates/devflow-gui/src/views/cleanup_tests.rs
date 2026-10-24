@@ -682,3 +682,122 @@ fn the_palette_opens_the_page_and_a_remedy_for_another_project_does_not(cx: &mut
         "the page stays closed"
     );
 }
+
+#[gpui_kit::test]
+fn a_record_that_may_be_a_copys_is_bound_to_the_repository_by_a_button_the_person_confirms(
+    cx: &mut TestAppContext,
+) {
+    let scratch = scratch_project();
+    let root = scratch.entry.root.clone();
+    let project = project_of(&scratch);
+    let receipt = forgotten(&project, "feature/restored", false);
+    // The repository was restored to this path: the record is another
+    // directory's.
+    let common = project.git_common_dir.clone();
+    let mut record = ledger::read(&common, receipt.instance_id).unwrap().unwrap();
+    record.checkout.identity = Some("12345:678".into());
+    std::fs::write(
+        ledger::path(&common, receipt.instance_id),
+        serde_json::to_vec_pretty(&record).unwrap(),
+    )
+    .unwrap();
+
+    let h = open_scratch(cx, &scratch);
+    update(cx, &h, |s, _| s.pitchfork = Fake::new().source());
+    open_page(cx, &h, &root);
+    let key = short(&receipt);
+
+    // It is listed with why, as unknown, and cannot be picked.
+    let (reason, remedies) = cx.read_entity(&h.state, |s, _| {
+        let entry = s
+            .cleanup
+            .read()
+            .unwrap()
+            .entry(receipt.instance_id)
+            .unwrap()
+            .clone();
+        assert_eq!(entry.class, Class::Unknown);
+        assert!(!entry.removable && entry.rebindable());
+        (entry.reason.clone().unwrap_or_default(), entry.remedies)
+    });
+    assert!(!names_a_command(&reason), "{reason}");
+    let index = remedies
+        .iter()
+        .position(|r| matches!(r, Remedy::RebindRecord { .. }))
+        .expect("core offers to bind it");
+    let button = super::remedies::id(&format!("cleanup-remedy-{key}"), index, &remedies[index]);
+    assert!(!names_a_command(&remedies[index].label()));
+    frame(cx, &h, |window| {
+        assert!(window.find(button.clone()).visible());
+        assert!(
+            window
+                .try_find(id(format!("cleanup-select-{key}")))
+                .is_none(),
+            "an unknown record is not offered for removal"
+        );
+    });
+
+    // The button asks first, and nothing is bound before the answer.
+    click(cx, &h, button.clone());
+    wait(cx, "the question opens", |cx| exists(cx, &h, "confirm"));
+    assert_eq!(
+        ledger::read(&common, receipt.instance_id)
+            .unwrap()
+            .unwrap()
+            .checkout
+            .identity
+            .as_deref(),
+        Some("12345:678")
+    );
+    answer(cx, &h, "cancel");
+    wait(cx, "the question closed", |cx| !exists(cx, &h, "confirm"));
+    assert_eq!(
+        ledger::read(&common, receipt.instance_id)
+            .unwrap()
+            .unwrap()
+            .checkout
+            .identity
+            .as_deref(),
+        Some("12345:678"),
+        "cancelling binds nothing"
+    );
+
+    // Confirmed: bound, nothing removed, and the page shows it as any other
+    // record now, with its checkbox.
+    click(cx, &h, button);
+    wait(cx, "the question opens", |cx| exists(cx, &h, "confirm"));
+    confirm_removal(cx, &h);
+    settle(cx, &h, |s| {
+        s.busy().is_none()
+            && !s.cleanup.loading
+            && s.activity.as_ref().is_some_and(|a| {
+                a.title == "Bind a record to this repository" && a.outcome.is_some()
+            })
+    });
+    cx.read_entity(&h.state, |s, _| {
+        let outcome = s.activity.as_ref().unwrap().outcome.as_ref().unwrap();
+        let done = outcome.as_ref().expect("the job worked");
+        assert!(
+            done.summary.contains("feature/restored"),
+            "{}",
+            done.summary
+        );
+        let entry = s
+            .cleanup
+            .read()
+            .unwrap()
+            .entry(receipt.instance_id)
+            .unwrap();
+        assert_eq!(entry.class, Class::RemovedElsewhere);
+        assert!(entry.removable);
+    });
+    assert!(
+        ledger::read(&common, receipt.instance_id)
+            .unwrap()
+            .is_some(),
+        "binding removes nothing"
+    );
+    frame(cx, &h, |window| {
+        assert!(window.find(id(format!("cleanup-select-{key}"))).visible());
+    });
+}

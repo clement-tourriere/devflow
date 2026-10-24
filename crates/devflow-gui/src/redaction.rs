@@ -81,7 +81,6 @@ impl From<String> for RawName {
 pub fn detection(detection: &mut Detection) {
     mask_option(&mut detection.version);
     mask_option(&mut detection.problem);
-    mask_all(&mut detection.missing_features);
 }
 
 /// The proxy's routes: the URLs and states pitchfork prints.
@@ -187,6 +186,33 @@ pub fn services(model: &mut crate::services::ServicesModel) {
     for orphan in &mut model.orphans.branches {
         mask(&mut orphan.name);
         mask(&mut orphan.reason);
+    }
+    for service in &mut model.sqlite {
+        // `key` is the identity of requests; the rest is text.
+        mask(&mut service.path);
+        match &mut service.databases {
+            // `workspace` is a `RawName` (masked where drawn) and `checkout`
+            // an identity.
+            Ok(databases) => {
+                for database in databases {
+                    mask_option(&mut database.source);
+                    mask_option(&mut database.journal_mode);
+                    mask_all(&mut database.sidecars);
+                }
+            }
+            Err(why) => mask(why),
+        }
+        match &mut service.snapshots {
+            Ok(snapshots) => {
+                for snapshot in &mut snapshots.ready {
+                    // `name` is the identity of a delete or a reset: a `RawName`.
+                    mask(&mut snapshot.source);
+                    mask(&mut snapshot.created);
+                    mask_option(&mut snapshot.how);
+                }
+            }
+            Err(why) => mask(why),
+        }
     }
     for detail in model.details.iter_mut().flatten() {
         mask(&mut detail.image);
@@ -420,7 +446,7 @@ mod tests {
             path: Some(PathBuf::from("/usr/local/bin/pitchfork")),
             installed: false,
             version: None,
-            missing_features: vec![format!("list --json ({URL})")],
+            unsupported: None,
             problem: Some(format!("exit 1: {URL}")),
         };
         detection(&mut found);

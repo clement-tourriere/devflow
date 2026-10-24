@@ -61,7 +61,7 @@ pub fn activate(
         progress,
     )?
     .context("setup did not run")?;
-    finish(project, held, &options, progress)
+    finish(held, &options, progress)
 }
 
 /// Create a workspace and enter it: the first entry is a switch too. A
@@ -75,28 +75,31 @@ pub fn create_and_activate(
 ) -> Result<SetupOutcome> {
     let options = request.options.clone();
     let held = create_held(project, request, progress, true)?;
-    finish(project, held, &options, progress)
+    finish(held, &options, progress)
 }
 
 /// Steps 2 (already done by setup, under the same lock) to 6, for a workspace
 /// whose setup just ran.
-fn finish(
-    project: &Project,
-    held: Held,
-    options: &SetupOptions,
-    progress: &mut dyn Progress,
-) -> Result<SetupOutcome> {
+fn finish(held: Held, options: &SetupOptions, progress: &mut dyn Progress) -> Result<SetupOutcome> {
     let Held {
         mut outcome,
         lock,
         process,
         fresh,
+        project,
+        // Held until the entry is over.
+        _instance,
     } = held;
+    // The configuration the run resolved and kept: the switch hooks and the
+    // rest of the entry work from it, whatever the setup hooks did to the files.
+    let project = &project;
     let workspace = outcome.workspace.clone();
 
     // When the workspace was last entered: recorded first, so a crash later
     // in the activation still leaves it.
     outcome.receipt.last_active_at = Some(chrono::Utc::now());
+    // Entering a suspended workspace resumes it: the containers start below.
+    outcome.resumed_from = outcome.receipt.suspended_at.take();
     outcome.receipt.save(&workspace.git_dir)?;
 
     match refresh_endpoint(
@@ -292,6 +295,13 @@ impl SetupOutcome {
             .collect();
         if let Some(drift) = &self.drift {
             notes.push(format!("{}: {}", self.workspace.name, drift.describe()));
+        }
+        if let Some(since) = self.resumed_from {
+            notes.push(format!(
+                "{} was suspended since {}; it is resumed",
+                self.workspace.name,
+                since.format("%Y-%m-%d %H:%M UTC")
+            ));
         }
         notes
     }

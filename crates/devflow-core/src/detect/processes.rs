@@ -1,15 +1,14 @@
 //! Processes a developer runs while working on the project.
 //!
-//! A process is reported as an identity (`name`, `cwd`, `source`, `role`), a
-//! way to start it ([`ProcessLaunch`]: an argument vector built by the scan,
-//! or a pointer to a Procfile line) and a `display` string for people.
+//! A process is reported as an identity (`name`, `cwd`, `source`, `role`) and
+//! a way to start it ([`ProcessLaunch`]: an argument vector built by the scan,
+//! or a pointer to a Procfile line).
 //!
 //! No command text that comes from the repository is retained. Script bodies
 //! are not (package scripts and mise tasks are referenced by name, as one
 //! argument), and neither is a Procfile command line, which often inlines
 //! credentials in forms no masking recognizes (`--password hunter2`): a
-//! Procfile process is displayed as `<file>: <process>` and carries a
-//! pointer to its line.
+//! Procfile process carries a pointer to its line.
 use super::facts::{
     Framework, FrameworkFact, JsProject, PackageManagerFact, ProcessFact, ProcessLaunch,
     ProcessRole, ProcessSource, PythonProject, PythonTool, ToolchainFacts, WiringFacts,
@@ -71,13 +70,12 @@ pub(super) fn detect(
     if let Some(pitchfork) = &wiring.pitchfork {
         for daemon in &pitchfork.daemons {
             let added = out.push_with(|| ProcessFact {
-                name: daemon.name.clone(),
-                display: None,
+                name: daemon.clone(),
                 launch: None,
                 cwd: ".".into(),
                 source: ProcessSource::Pitchfork,
-                role: role_of(&daemon.name, ProcessRole::Other),
-                evidence: vec![format!("{}:daemons.{}", pitchfork.file, daemon.name)],
+                role: role_of(daemon, ProcessRole::Other),
+                evidence: vec![format!("{}:daemons.{daemon}", pitchfork.file)],
             });
             if !added {
                 break;
@@ -153,7 +151,7 @@ fn role_of(name: &str, default: ProcessRole) -> ProcessRole {
     }
 }
 
-/// Text for people: control characters escaped (a name must not move the
+/// A name for a warning: control characters escaped (a name must not move the
 /// cursor or recolor a terminal), credentials masked, then clipped. Masking
 /// runs on the whole text first, so clipping can never cut a credential in
 /// half and leave a recognizable prefix.
@@ -171,7 +169,7 @@ fn displayable(text: &str) -> String {
     redact::text(&escaped).chars().take(MAX_DISPLAY).collect()
 }
 
-/// An argument-vector process: `display` is the shell rendering of `argv`.
+/// An argument-vector process.
 fn argv_process(
     argv: Vec<String>,
     name: &str,
@@ -183,7 +181,6 @@ fn argv_process(
     let launch = ProcessLaunch::Argv { argv };
     ProcessFact {
         name: name.to_string(),
-        display: launch.shell_line().map(|line| displayable(&line)),
         launch: Some(launch),
         cwd: cwd.to_string(),
         source,
@@ -248,7 +245,6 @@ fn procfiles(repo: &Repo, project: &Project, out: &mut Processes) {
                 // not: masking recognizes `--password=x` and `password: x`, not
                 // `--password x`, so what is left would still carry secrets.
                 // The line is found again through `launch`.
-                display: Some(displayable(&format!("{file}: {process}"))),
                 launch: Some(ProcessLaunch::Procfile {
                     file: file.clone(),
                     process: process.to_string(),
@@ -492,7 +488,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn displays_are_masked_escaped_and_clipped() {
+    fn names_in_warnings_are_masked_escaped_and_clipped() {
         // kingfisher:ignore
         let shown = displayable("env DATABASE_URL=postgresql://alice:SECRET@host/db python app.py");
         assert!(!shown.contains("SECRET"), "{shown}");

@@ -174,6 +174,8 @@ pub fn generatable_names() -> BTreeSet<String> {
     found.extend(names([
         config::DEFAULT_CACHE_ENV,
         config::MYSQL_URL_ENV,
+        config::SQLITE_URL_ENV,
+        config::DEFAULT_SQLITE_PATH_ENV,
         "TEST_DATABASE_URL",
         "SHADOW_DATABASE_URL",
     ]));

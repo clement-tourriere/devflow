@@ -258,8 +258,13 @@ fn adding_a_hook_edits_the_file_in_place_and_says_it_needs_review() {
         "30s",
     ]);
     ok(&out);
+    // The file is named in full: a workspace's own and the main checkout's are
+    // different files.
+    let said = stdout(&out);
     assert!(
-        stdout(&out).contains("Added in hooks.teardown (devflow.toml)."),
+        said.contains("Added in hooks.teardown (")
+            && said.contains(&env.repo.display().to_string())
+            && said.contains("devflow.toml)."),
         "{}",
         describe(&out)
     );

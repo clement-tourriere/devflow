@@ -4,6 +4,7 @@
 //! or `.env` exists to say so.
 use super::facts::{DriverFact, Engine};
 use super::manifest::{Deps, Discovery, Project};
+use std::collections::HashSet;
 
 /// Most driver facts a scan reports.
 const MAX_DRIVERS: usize = 60;
@@ -135,8 +136,16 @@ const JVM: &[(&str, Engine)] = &[
     ("spring-boot-starter-data-mongodb", Engine::Mongodb),
 ];
 
+/// The facts, and the `(project, engine, dependency)` triples they came from:
+/// a dependency found twice in one project (two files naming it) is one fact.
+#[derive(Default)]
+struct Found {
+    facts: Vec<DriverFact>,
+    seen: HashSet<(String, Engine, String)>,
+}
+
 pub(super) fn detect(discovery: &Discovery) -> Vec<DriverFact> {
-    let mut out = Vec::new();
+    let mut out = Found::default();
     for project in &discovery.projects {
         exact(project, &project.js_deps, JS, &mut out);
         exact(project, &project.py, PYTHON, &mut out);
@@ -155,15 +164,15 @@ pub(super) fn detect(discovery: &Discovery) -> Vec<DriverFact> {
                 push(&mut out, project, *engine, needle, file);
             }
         }
-        if out.len() >= MAX_DRIVERS {
+        if out.facts.len() >= MAX_DRIVERS {
             break;
         }
     }
-    out.truncate(MAX_DRIVERS);
-    out
+    out.facts.truncate(MAX_DRIVERS);
+    out.facts
 }
 
-fn exact(project: &Project, deps: &Deps, table: &[(&str, Engine)], out: &mut Vec<DriverFact>) {
+fn exact(project: &Project, deps: &Deps, table: &[(&str, Engine)], out: &mut Found) {
     for (name, engine) in table {
         if let Some(evidence) = deps.evidence(name) {
             push(out, project, *engine, name, &evidence);
@@ -172,7 +181,7 @@ fn exact(project: &Project, deps: &Deps, table: &[(&str, Engine)], out: &mut Vec
 }
 
 /// `sqlx`, `diesel` and `sea-orm` pick the engine through Cargo features.
-fn rust_features(project: &Project, out: &mut Vec<DriverFact>) {
+fn rust_features(project: &Project, out: &mut Found) {
     for name in ["sqlx", "diesel", "sea-orm"] {
         let Some(evidence) = project.rs.evidence(name) else {
             continue;
@@ -193,21 +202,13 @@ fn rust_features(project: &Project, out: &mut Vec<DriverFact>) {
     }
 }
 
-fn push(
-    out: &mut Vec<DriverFact>,
-    project: &Project,
-    engine: Engine,
-    dependency: &str,
-    evidence: &str,
-) {
-    let duplicate = out
-        .iter()
-        .any(|d| d.path == project.path && d.engine == engine && d.dependency == dependency);
-    if !duplicate {
-        out.push(DriverFact {
+fn push(out: &mut Found, project: &Project, engine: Engine, dependency: &str, evidence: &str) {
+    if out
+        .seen
+        .insert((project.path.clone(), engine, dependency.to_string()))
+    {
+        out.facts.push(DriverFact {
             engine,
-            path: project.path.clone(),
-            dependency: dependency.to_string(),
             evidence: vec![evidence.to_string()],
         });
     }

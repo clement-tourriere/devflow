@@ -201,7 +201,25 @@ pub fn emit_error(
     hint: Option<&String>,
     remedies: &[Remedy],
 ) {
-    let mut body = serde_json::json!({ "error": message });
+    emit_error_with(warnings, command, message, hint, remedies, Value::Null);
+}
+
+/// [`emit_error`] for a command that did part of its work before it failed:
+/// `partial` (an object) is kept in the same document beside `error`, `hint`
+/// and `remedies`.
+pub fn emit_error_with(
+    warnings: Vec<String>,
+    command: &str,
+    message: &str,
+    hint: Option<&String>,
+    remedies: &[Remedy],
+    partial: Value,
+) {
+    let mut body = match partial {
+        Value::Object(map) => Value::Object(map),
+        _ => serde_json::json!({}),
+    };
+    body["error"] = Value::String(message.to_string());
     if let Some(hint) = hint {
         body["hint"] = Value::String(hint.clone());
     }

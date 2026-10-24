@@ -281,7 +281,7 @@ fn dotenv(project: &Project, workspace: &str, path: &Path, env: &ChildEnv) -> Op
                 .collect()
         })
         .unwrap_or_default();
-    let conflicts = env_owner::dotenv_conflicts_among(&project.config, path, env, &copied);
+    let conflicts = env_owner::dotenv_conflicts_among(&project.at(path).config, path, env, &copied);
     if conflicts.is_empty() {
         return None;
     }

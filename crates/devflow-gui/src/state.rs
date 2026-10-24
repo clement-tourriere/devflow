@@ -88,6 +88,10 @@ pub struct TrustPrompt {
     /// (or, for a new workspace, the one it is made from).
     pub target: PathBuf,
     pub scope: Scope,
+    /// The scope is the one the workspace would have with the default
+    /// workspace's recipes chosen for it (the choice is made once this is
+    /// approved): judged, approved and checked as that.
+    pub choosing: bool,
 }
 
 /// Does an operation that runs `teardown` or setup hooks (or applies `[env]`
@@ -582,11 +586,24 @@ impl AppState {
     /// from), or `None` when no review is needed (nothing relevant, already
     /// approved, or the environment override is set and core decides). The
     /// scope and its approval state are those of `target` itself.
-    pub fn trust_prompt(&self, target: &Path, purpose: TrustPurpose) -> Option<TrustPrompt> {
+    /// `choosing`: the workspace is about to run the default workspace's recipes
+    /// by choice, so what is reviewed is their scope in that workspace, not the
+    /// empty one it has until then.
+    pub fn trust_prompt(
+        &self,
+        target: &Path,
+        purpose: TrustPurpose,
+        choosing: bool,
+    ) -> Option<TrustPrompt> {
         let model = self.selection.current()?;
         let project = model.project.clone()?;
-        let scope = trust::scope_at(&project, target);
-        let state = trust::state_at(&project, target).ok();
+        let judged = if choosing {
+            std::borrow::Cow::Owned(project.at_choosing(target, true))
+        } else {
+            std::borrow::Cow::Borrowed(&*project)
+        };
+        let scope = trust::scope_at(&judged, target);
+        let state = trust::state_at(&judged, target).ok();
         let ask = match purpose {
             TrustPurpose::Setup => {
                 needs_trust_prompt(state.as_ref(), &scope, false, trust::env_override())
@@ -603,6 +620,7 @@ impl AppState {
             project,
             target: target.to_path_buf(),
             scope,
+            choosing,
         })
     }
 
@@ -1100,6 +1118,7 @@ fn apply_loaded(model: &mut ProjectModel, refreshed: Refreshed) {
     if let Some(pitchfork) = refreshed.pitchfork {
         model.pitchfork = pitchfork;
     }
+    model.focus = refreshed.focus;
     if let Some(config) = refreshed.config {
         match config {
             Ok(doc) => {

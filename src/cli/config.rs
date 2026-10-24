@@ -1,11 +1,14 @@
 //! `devflow config`: bring a project's configuration files to the current
-//! format. Core works out and writes the change
-//! (`devflow_core::config_edit::migrate`); this module shows it and asks.
+//! format, and print their JSON Schema. Core works out and writes the change
+//! (`devflow_core::config_edit::migrate`); this module shows it and asks. The
+//! schema is generated from the configuration types
+//! (`devflow_core::config_schema`).
 use super::Ctx;
-use super::output::{self, Palette, note, say};
+use super::output::{self, Palette, note, say, say_raw};
 use anyhow::Result;
 use clap::{Args, Subcommand};
 use devflow_core::config_edit::migrate;
+use devflow_core::config_schema::{self, Document};
 use devflow_core::project::main_checkout;
 use devflow_core::propose::DiffKind;
 use devflow_core::redact;
@@ -16,14 +19,24 @@ use std::process::ExitCode;
 pub enum ConfigCommand {
     /// Rewrite an earlier build's `[postgres]` table as `[services.db]`
     Migrate(MigrateArgs),
+    /// Print the JSON Schema of devflow.toml (for editors) on standard output
+    Schema(SchemaArgs),
 }
 
 impl ConfigCommand {
     pub fn json_name(&self) -> &'static str {
         match self {
             ConfigCommand::Migrate(_) => "config migrate",
+            ConfigCommand::Schema(_) => "config schema",
         }
     }
+}
+
+#[derive(Args)]
+pub struct SchemaArgs {
+    /// Print the schema of devflow.local.toml, the machine-local overlay, instead
+    #[arg(long)]
+    pub local: bool,
 }
 
 #[derive(Args)]
@@ -40,7 +53,20 @@ pub fn run(ctx: &Ctx, command: ConfigCommand) -> Result<ExitCode> {
     let name = command.json_name();
     match command {
         ConfigCommand::Migrate(args) => migrate_config(ctx, name, args),
+        ConfigCommand::Schema(args) => print_schema(&args),
     }
+}
+
+/// The schema is JSON already, so it is printed as it is with or without
+/// `--json`: no envelope, no progress, nothing else on standard output.
+fn print_schema(args: &SchemaArgs) -> Result<ExitCode> {
+    let document = if args.local {
+        Document::Local
+    } else {
+        Document::Project
+    };
+    say_raw(config_schema::render(document)?);
+    Ok(ExitCode::SUCCESS)
 }
 
 fn migrate_config(ctx: &Ctx, name: &str, args: MigrateArgs) -> Result<ExitCode> {

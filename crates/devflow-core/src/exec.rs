@@ -197,6 +197,8 @@ pub fn run(
     args: &[std::ffi::OsString],
     dir: Option<&Path>,
 ) -> std::result::Result<u8, NotStarted> {
+    // The workspace was just used: one stat, and at most one tiny write.
+    crate::suspend::touch_activity(&prepared.root);
     let mut command = Command::new(program);
     command.args(args);
     if let Some(dir) = dir {

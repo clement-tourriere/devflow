@@ -25,7 +25,7 @@ fn finding_5_procfile_commands_are_never_copied_into_the_facts() {
 
     let web = process(&facts, "web", ProcessSource::Procfile).expect("web");
     // Not even a masked form of the command is kept (see round 2, finding 4).
-    assert_eq!(web.display.as_deref(), Some("Procfile: web"));
+    assert_eq!(shown(web).as_deref(), Some("Procfile: web"));
     assert_eq!(
         web.launch,
         Some(ProcessLaunch::Procfile {
@@ -37,7 +37,7 @@ fn finding_5_procfile_commands_are_never_copied_into_the_facts() {
     assert_eq!(web.evidence, vec!["Procfile:web"]);
 
     let worker = process(&facts, "worker", ProcessSource::Procfile).expect("worker");
-    assert_eq!(worker.display.as_deref(), Some("Procfile: worker"));
+    assert_eq!(shown(worker).as_deref(), Some("Procfile: worker"));
     assert_eq!(worker.role, ProcessRole::Worker);
 
     // Neither the serialized facts nor their Debug output carry the secrets.
@@ -202,10 +202,16 @@ fn finding_10_pnpm_members_come_from_pnpm_workspace_yaml_only() {
         .map(|p| p.path.as_str())
         .collect();
     assert_eq!(members, vec!["packages/b"]);
-    let workspaces = root.workspaces.as_ref().expect("workspaces");
-    assert_eq!(workspaces.source, WorkspaceSource::PnpmWorkspaceYaml);
-    assert_eq!(workspaces.patterns, vec!["packages/*"]);
-    assert_eq!(workspaces.evidence, vec!["pnpm-workspace.yaml:packages"]);
+    assert!(root.workspaces);
+    assert!(
+        root.evidence
+            .contains(&"pnpm-workspace.yaml:packages".to_string())
+    );
+    assert!(
+        !root
+            .evidence
+            .contains(&"package.json:workspaces".to_string())
+    );
     // `apps/a` is not a pnpm workspace member: a project of its own.
     assert!(facts.js.iter().any(|p| p.path == "apps/a"));
     assert!(has_warning(&facts, "pnpm reads pnpm-workspace.yaml"));
@@ -235,9 +241,18 @@ fn finding_10_npm_yarn_and_bun_members_come_from_package_json_only() {
             .map(|p| p.path.as_str())
             .collect();
         assert_eq!(members, vec!["apps/a"], "{pin}");
-        let workspaces = root.workspaces.as_ref().expect("workspaces");
-        assert_eq!(workspaces.source, WorkspaceSource::PackageJson, "{pin}");
-        assert_eq!(workspaces.patterns, vec!["apps/*"], "{pin}");
+        assert!(root.workspaces, "{pin}");
+        assert!(
+            root.evidence
+                .contains(&"package.json:workspaces".to_string()),
+            "{pin}"
+        );
+        assert!(
+            !root
+                .evidence
+                .contains(&"pnpm-workspace.yaml:packages".to_string()),
+            "{pin}"
+        );
         assert!(
             facts
                 .warnings
@@ -356,7 +371,8 @@ fn round_2_finding_1_a_repeated_entry_after_devflow_env_overrides_it() {
         "[env]\n_.file = [\".env\", \".devflow/env\", \".env\"]\n",
     )]);
     let mise = facts.toolchain.mise.as_ref().expect("mise");
-    assert_eq!(mise.env_files, vec![".env", ".devflow/env", ".env"]);
+    let listed: Vec<&str> = mise.env_entries.iter().map(|e| e.path.as_str()).collect();
+    assert_eq!(listed, vec![".env", ".devflow/env", ".env"]);
     // And the same file written twice in a row is not an override of itself.
     let wiring = wired(r#"[".env", ".devflow/env", ".devflow/env"]"#);
     assert!(wiring.mise_env_overridden_by.is_empty());
@@ -500,11 +516,11 @@ fn finding_12_script_and_task_names_are_single_arguments() {
         })
     );
     assert_eq!(
-        script("dev:web app").display.as_deref(),
+        shown(script("dev:web app")).as_deref(),
         Some("npm run 'dev:web app'")
     );
     assert_eq!(
-        script("dev:$(touch pwned)").display.as_deref(),
+        shown(script("dev:$(touch pwned)")).as_deref(),
         Some("npm run 'dev:$(touch pwned)'")
     );
     assert_eq!(
@@ -516,10 +532,10 @@ fn finding_12_script_and_task_names_are_single_arguments() {
         Some("npm run 'dev:a;b'")
     );
     assert_eq!(
-        script("dev:it's").display.as_deref(),
+        shown(script("dev:it's")).as_deref(),
         Some("npm run 'dev:it'\\''s'")
     );
-    assert_eq!(script("dev").display.as_deref(), Some("npm run dev"));
+    assert_eq!(shown(script("dev")).as_deref(), Some("npm run dev"));
     // A name with a control character is not offered at all.
     assert!(
         !facts.processes.iter().any(|p| p.name.contains('\u{1b}')),
@@ -536,7 +552,7 @@ fn finding_12_script_and_task_names_are_single_arguments() {
         })
     );
     assert_eq!(
-        mise.display.as_deref(),
+        shown(mise).as_deref(),
         Some("mise run 'dev:x; touch pwned'")
     );
 }
@@ -556,7 +572,7 @@ fn finding_12_every_tool_built_process_has_an_argument_vector() {
     // begins with a dash is refused (see the unit tests).
     for p in &facts.processes {
         match p.source {
-            ProcessSource::Pitchfork => assert!(p.launch.is_none() && p.display.is_none()),
+            ProcessSource::Pitchfork => assert!(p.launch.is_none()),
             _ => assert!(
                 matches!(p.launch, Some(ProcessLaunch::Argv { .. })),
                 "{p:?}"

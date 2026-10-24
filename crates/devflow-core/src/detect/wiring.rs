@@ -1,5 +1,5 @@
 //! Configuration devflow, pitchfork and mise already have in the repository.
-use super::facts::{PitchforkDaemon, PitchforkFacts, ToolchainFacts, WiringFacts};
+use super::facts::{PitchforkFacts, ToolchainFacts, WiringFacts};
 use super::manifest::parse_toml;
 use super::push_unique;
 use super::repo::Repo;
@@ -26,17 +26,7 @@ pub(super) fn detect(repo: &Repo, toolchain: &ToolchainFacts) -> WiringFacts {
         .map(|f| (*f).to_string())
         .collect();
 
-    let mut evidence: Vec<String> = Vec::new();
-    for file in devflow_config
-        .iter()
-        .chain(&devflow_local_config)
-        .chain(&legacy_devflow_files)
-    {
-        push_unique(&mut evidence, file.clone());
-    }
-
     let pitchfork = if root.has_file("pitchfork.toml") {
-        push_unique(&mut evidence, "pitchfork.toml");
         pitchfork(repo)
     } else {
         None
@@ -76,11 +66,6 @@ pub(super) fn detect(repo: &Repo, toolchain: &ToolchainFacts) -> WiringFacts {
                 }
             }
         }
-        if mise_loads_devflow_env || !mise_env_unresolved.is_empty() {
-            for entry in mise.evidence.iter().filter(|e| e.contains(":env._.")) {
-                push_unique(&mut evidence, entry.clone());
-            }
-        }
     }
     WiringFacts {
         devflow_config,
@@ -91,7 +76,6 @@ pub(super) fn detect(repo: &Repo, toolchain: &ToolchainFacts) -> WiringFacts {
         mise_env_unresolved,
         mise_env_overridden_by,
         mise_env_overridden_when_selected,
-        evidence,
     }
 }
 
@@ -143,28 +127,19 @@ fn classify_env_path(path: &str) -> EnvPath {
 fn pitchfork(repo: &Repo) -> Option<PitchforkFacts> {
     let file = "pitchfork.toml";
     let table = parse_toml(repo, file, &repo.read_text(file)?)?;
-    let mut daemons: Vec<PitchforkDaemon> = table
+    let mut daemons: Vec<String> = table
         .get("daemons")
         .and_then(toml::Value::as_table)
-        .map(|t| {
-            t.iter()
-                .map(|(name, daemon)| PitchforkDaemon {
-                    name: name.clone(),
-                    mise: daemon.get("mise").and_then(toml::Value::as_bool) == Some(true),
-                })
-                .collect()
-        })
+        .map(|t| t.keys().cloned().collect())
         .unwrap_or_default();
-    daemons.sort_by(|a, b| a.name.cmp(&b.name));
-    let all_daemons_use_mise = !daemons.is_empty() && daemons.iter().all(|d| d.mise);
+    daemons.sort();
     let evidence = daemons
         .iter()
-        .map(|d| format!("{file}:daemons.{}", d.name))
+        .map(|name| format!("{file}:daemons.{name}"))
         .collect();
     Some(PitchforkFacts {
         file: file.to_string(),
         daemons,
-        all_daemons_use_mise,
         evidence,
     })
 }

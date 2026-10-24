@@ -6,6 +6,7 @@ use crate::githook::{self, InstallState};
 use crate::project::Project;
 use crate::receipt::Status;
 use crate::remedy::{self, Remedy};
+use crate::tools::{self, Probe, Tool};
 use crate::trust::{self, TrustState};
 use crate::{cow, pitchfork, processes, setup, worktree};
 use serde::Serialize;
@@ -111,21 +112,19 @@ pub fn run_in(project: Option<&Project>, cwd: &Path) -> Vec<Check> {
     checks.extend(docker(managed));
     if let Some(project) = project {
         checks.extend(project_config(project));
+        checks.extend(checkout(project));
         checks.extend(worktree_dir(project));
         if project.config.postgres().is_some() {
             checks.extend(postgres(project));
         }
         checks.extend(container_services(project));
+        checks.extend(sqlite_services(project));
+        checks.extend(recipes(project, cwd));
         checks.extend(hook_trust(project, cwd));
         checks.extend(git_hook(project));
     }
     checks.extend(pitchfork_checks(project, cwd));
-    checks.extend(tool(
-        "mise",
-        find_on_path("mise"),
-        "https://mise.jdx.dev",
-        "toolchains and dependency installation in setup hooks",
-    ));
+    checks.extend(mise_tool(find_on_path("mise")));
     if let Some(project) = project {
         checks.extend(workspaces(project));
         checks.extend(mise::checks(project));
@@ -148,6 +147,102 @@ fn git() -> Vec<Check> {
         "git",
         format!("libgit2 {major}.{minor}.{patch} (built in; no `git` binary needed)"),
     )]
+}
+
+/// The `sqlite` services: where each database is in the main checkout, the
+/// library that copies it and the state of its snapshots. Reads only; no
+/// database is opened.
+fn sqlite_services(project: &Project) -> Vec<Check> {
+    project
+        .config
+        .sqlite_services()
+        .map(|(key, section)| {
+            let name = format!("sqlite-{key}");
+            let file = crate::sqlite::file_in(&project.root, section);
+            let status = crate::sqlite::status(&file);
+            let present = if status.exists {
+                format!("{} in the main checkout", section.path)
+            } else {
+                format!("{} does not exist yet in the main checkout", section.path)
+            };
+            let library = format!("SQLite {} (bundled)", crate::sqlite::library_version());
+            let store = crate::sqlite::Store::open(project.id(), key)
+                .and_then(|store| Ok((store.list()?, store.unfinished()?, store.damaged()?)));
+            let (snapshots, unfinished, damaged) = match store {
+                Ok(found) => found,
+                Err(error) => {
+                    return Check::fail(
+                        &name,
+                        format!("{key}: the snapshots cannot be read: {error:#}"),
+                        "the snapshot catalog is in the data directory; restore or remove it",
+                    );
+                }
+            };
+            let detail = format!(
+                "{key}: {present}; {library}; {} snapshot{}",
+                snapshots.len(),
+                if snapshots.len() == 1 { "" } else { "s" }
+            );
+            if !damaged.is_empty() {
+                Check::warn(
+                    &name,
+                    format!(
+                        "{detail}; the files of {} are gone or changed, so their data is lost",
+                        damaged.join(", ")
+                    ),
+                    "delete those snapshots and take them again",
+                )
+            } else if !unfinished.is_empty() {
+                Check::warn(
+                    &name,
+                    format!(
+                        "{detail}; {} snapshot operation{} did not finish",
+                        unfinished.len(),
+                        if unfinished.len() == 1 { "" } else { "s" }
+                    ),
+                    "the next snapshot operation of this service settles them",
+                )
+            } else {
+                Check::ok(&name, detail)
+            }
+        })
+        .collect()
+}
+
+/// The native checkout, when `devflow.local.toml` chose it: the `git` that
+/// will run, and what choosing it authorizes. Nothing for the default.
+fn checkout(project: &Project) -> Vec<Check> {
+    if project.config.worktree.checkout != crate::config::CheckoutBackend::Git {
+        return Vec::new();
+    }
+    let local = project.root.join(crate::config::LOCAL_CONFIG_FILE);
+    match worktree::native::Git::locate(project) {
+        Ok(git) => vec![Check::ok(
+            "checkout",
+            format!(
+                "new worktrees are checked out by Git ({}) because {} asks for it; Git runs the \
+                 repository's and your own filters, hooks and helpers, which the approval of \
+                 devflow's hooks does not cover",
+                git.version,
+                crate::config::LOCAL_CONFIG_FILE
+            ),
+        )],
+        Err(error) => {
+            let remedies = remedy::remedies_of(&error);
+            // The environment of another workspace is not a Git problem.
+            let fix = if remedies.contains(&Remedy::ClearInherited) {
+                "start devflow from a shell that is not inside another workspace, or let it \
+                 clear the inherited variables"
+            } else {
+                "install Git, or remove `worktree.checkout` from devflow.local.toml"
+            };
+            vec![
+                Check::fail("checkout", format!("{error:#}"), fix)
+                    .fixes(remedies)
+                    .fix(Remedy::OpenFile { path: local }),
+            ]
+        }
+    }
 }
 
 /// What the `docker` client answered, before the daemon is asked.
@@ -848,13 +943,13 @@ fn git_hook_state(project: &Project) -> Vec<Check> {
     }]
 }
 
-/// Install state of pitchfork, and, for a project that uses it, the checks of
-/// its namespace, its environment delivery and the proxy. The commands that
-/// would fix a problem are offered in the hint; none is run.
-fn pitchfork_checks(project: Option<&Project>, cwd: &Path) -> Vec<Check> {
-    let detection = pitchfork::detect();
-    const INSTALL: &str = "install it (devflow asks first), or run `mise use -g pitchfork@latest`";
-    let mut checks = vec![if detection.path.is_none() {
+/// Is there a pitchfork, does it run, and is it a release devflow supports
+/// ([`crate::tools::MIN_PITCHFORK`])? A release that is older, or whose version
+/// cannot be read, is the typed problem the gates refuse with, and carries the
+/// way to fix it.
+fn pitchfork_install_check(detection: &pitchfork::Detection) -> Check {
+    const INSTALL: &str = "install it (devflow asks first, and does it through mise)";
+    if detection.path.is_none() {
         Check::warn(
             "pitchfork",
             "`pitchfork` was not found on PATH (optional: daemons and the local HTTPS proxy)",
@@ -863,16 +958,24 @@ fn pitchfork_checks(project: Option<&Project>, cwd: &Path) -> Vec<Check> {
         .fix(Remedy::InstallPitchfork)
     } else if !detection.installed {
         Check::warn("pitchfork", detection.summary(), INSTALL).fix(Remedy::InstallPitchfork)
-    } else if !detection.missing_features.is_empty() {
+    } else if let Some(problem) = &detection.unsupported {
         Check::warn(
             "pitchfork",
             detection.summary(),
-            "upgrade it: `mise use -g pitchfork@latest`",
+            "upgrade it (devflow asks first, and does it through mise)",
         )
-        .fix(Remedy::InstallPitchfork)
+        .fixes(problem.remedies())
     } else {
         Check::ok("pitchfork", detection.summary())
-    }];
+    }
+}
+
+/// Install state of pitchfork, and, for a project that uses it, the checks of
+/// its namespace, its environment delivery and the proxy. The commands that
+/// would fix a problem are offered in the hint; none is run.
+fn pitchfork_checks(project: Option<&Project>, cwd: &Path) -> Vec<Check> {
+    let detection = pitchfork::detect();
+    let mut checks = vec![pitchfork_install_check(&detection)];
     let Some(project) = project else {
         return checks;
     };
@@ -957,14 +1060,37 @@ fn pitchfork_checks(project: Option<&Project>, cwd: &Path) -> Vec<Check> {
     checks
 }
 
-fn tool(name: &str, found: Option<PathBuf>, install: &str, purpose: &str) -> Vec<Check> {
-    vec![match found {
-        Some(path) => Check::ok(name, path.display().to_string()),
-        None => Check::warn(
-            name,
-            format!("`{name}` was not found on PATH (optional: {purpose})"),
-            format!("install: {install}"),
-        ),
+/// mise on `PATH`: found, runs, and a release devflow supports
+/// ([`tools::MIN_MISE`]). A release that is older, or that names none, is the
+/// typed problem the hook gate refuses with, and carries the page that says how
+/// to upgrade it.
+fn mise_tool(found: Option<PathBuf>) -> Vec<Check> {
+    let Some(path) = found else {
+        return vec![Check::warn(
+            "mise",
+            "`mise` was not found on PATH (optional: toolchains and dependency installation in \
+             setup hooks)",
+            "install it from https://mise.jdx.dev",
+        )];
+    };
+    vec![match tools::probe(Tool::Mise, &path) {
+        Probe::Supported(version) => {
+            Check::ok("mise", format!("mise {version} at {}", path.display()))
+        }
+        Probe::Unsupported(problem) => Check::warn(
+            "mise",
+            format!("{} (at {})", problem.message(), path.display()),
+            "upgrade mise (setup hooks that run it are not run until it is a supported release)",
+        )
+        .fixes(problem.remedies()),
+        Probe::DoesNotRun(why) => Check::warn(
+            "mise",
+            format!("{} is on PATH but does not run: {why}", path.display()),
+            "fix the installation, or install mise again from https://mise.jdx.dev",
+        )
+        .fix(Remedy::OpenGuide {
+            url: Tool::Mise.upgrade_page().to_string(),
+        }),
     }]
 }
 
@@ -1097,7 +1223,99 @@ fn workspaces(project: &Project) -> Vec<Check> {
             format!("{} workspace(s), none need attention", list.len()),
         ));
     }
+    // A branch's own devflow.toml never reconfigures the project: the shared
+    // sections it changes are reported, not applied.
+    for status in &list {
+        let Some(report) = &status.recipes else {
+            continue;
+        };
+        for differing in &report.differing {
+            checks.push(
+                Check::warn(
+                    "shared-sections",
+                    format!(
+                        "workspace '{}': {}",
+                        status.workspace.name,
+                        differing.warning()
+                    ),
+                    "the project's services, data and integrations are read from the main \
+                     checkout; change them there",
+                )
+                .fix(Remedy::OpenFile {
+                    path: report.shared.clone(),
+                }),
+            );
+        }
+        if let Some(local) = &report.ignored_local {
+            checks.push(Check::warn(
+                "local-config",
+                format!(
+                    "workspace '{}': {} is ignored; devflow.local.toml is read from the main \
+                     checkout and applies to every workspace",
+                    status.workspace.name,
+                    local.display()
+                ),
+                "move what it holds to the main checkout's devflow.local.toml",
+            ));
+        }
+    }
     checks
+}
+
+/// Where the recipes of the workspace a command started in `cwd` come from:
+/// its own `devflow.toml`, the main checkout's, or none (a missing or
+/// unusable file, which needs a choice).
+fn recipes(project: &Project, cwd: &Path) -> Vec<Check> {
+    use crate::effective::RecipesSource;
+    let dir = judged_dir(project, cwd);
+    let at = project.at(&dir);
+    let effective = at.effective();
+    let source = effective.recipes.describe();
+    let shared = format!(
+        "the project's services, data and integrations come from {}{}",
+        effective.shared.display(),
+        effective
+            .local
+            .as_ref()
+            .map(|local| format!(" with {}", local.display()))
+            .unwrap_or_default()
+    );
+    let judged = format!("judged at {}", dir.display());
+    vec![match &effective.recipes {
+        RecipesSource::Main { .. } | RecipesSource::Workspace { .. } => Check::ok(
+            "recipes",
+            format!("hooks, [env] and the copy list come from {source}; {shared} ({judged})"),
+        ),
+        RecipesSource::DefaultChosen { because, .. } => Check::warn(
+            "recipes",
+            format!(
+                "this workspace uses {source}: {}; {shared} ({judged})",
+                because.message
+            ),
+            "commit a valid devflow.toml in the workspace to use its own recipes; the choice is \
+             cleared then",
+        )
+        .fix(Remedy::OpenFile {
+            path: because.file.clone(),
+        }),
+        RecipesSource::Unavailable { because } => Check::fail(
+            "recipes",
+            format!(
+                "this workspace has no usable recipes: {}; no hooks, [env] or copy list apply \
+                 ({judged})",
+                because.message
+            ),
+            "commit a valid devflow.toml in the workspace, or use the default workspace's recipes",
+        )
+        .fix(Remedy::UseDefaultRecipes {
+            workspace: dir.clone(),
+        })
+        .fixes(
+            (because.kind != crate::effective::ProblemKind::Missing).then(|| Remedy::OpenFile {
+                path: because.file.clone(),
+            }),
+        ),
+    }]
 }
 
 /// The warning for workspaces whose receipt could not be read, so that who
@@ -1352,6 +1570,83 @@ mod tests {
         assert_eq!(check.status, CheckStatus::Ok, "{check:?}");
         assert!(check.remedies.is_empty());
         assert!(!check.detail.contains("echo mine"), "{}", check.detail);
+    }
+
+    #[test]
+    fn a_sqlite_service_is_checked_without_opening_its_database() {
+        let text = format!(
+            "[project]\nname = \"shop\"\nid = \"{}\"\n\n[services.app]\nengine = \"sqlite\"\n\
+             path = \"db/app.sqlite3\"\n",
+            uuid::Uuid::new_v4()
+        );
+        let t = testutil::repo(Some(&text));
+        let checks = run(Some(&t.project));
+        let check = find(&checks, "sqlite-app")[0];
+        assert_eq!(check.status, CheckStatus::Ok, "{check:?}");
+        assert!(
+            check.detail.contains("does not exist yet"),
+            "{}",
+            check.detail
+        );
+        assert!(check.detail.contains("bundled"), "{}", check.detail);
+        assert!(check.detail.contains("0 snapshots"), "{}", check.detail);
+        // A database in WAL mode is looked at, not opened: no file appears.
+        let file = t.root.join("db/app.sqlite3");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        let conn = rusqlite::Connection::open(&file).unwrap();
+        conn.pragma_update(None, "journal_mode", "wal").unwrap();
+        conn.execute_batch("CREATE TABLE t (n)").unwrap();
+        drop(conn);
+        let listing = || {
+            let mut names: Vec<_> = std::fs::read_dir(file.parent().unwrap())
+                .unwrap()
+                .filter_map(Result::ok)
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .collect();
+            names.sort();
+            names
+        };
+        let before = listing();
+        let checks = run(Some(&t.project));
+        assert_eq!(find(&checks, "sqlite-app")[0].status, CheckStatus::Ok);
+        assert!(
+            find(&checks, "sqlite-app")[0]
+                .detail
+                .contains("app.sqlite3 in the main checkout")
+        );
+        assert_eq!(listing(), before, "no -wal or -shm appeared");
+    }
+
+    #[test]
+    fn the_checkout_check_appears_only_when_the_local_file_chose_git() {
+        let t = testutil::repo(None);
+        assert!(find(&run(Some(&t.project)), "checkout").is_empty());
+        std::fs::write(
+            t.root.join("devflow.local.toml"),
+            "[worktree]\ncheckout = \"git\"\n",
+        )
+        .unwrap();
+        let project = Project::open(&t.root).unwrap();
+        let checks = run(Some(&project));
+        let check = find(&checks, "checkout")[0];
+        if find_on_path("git").is_some() {
+            assert_eq!(check.status, CheckStatus::Ok, "{check:?}");
+            assert!(check.detail.contains("git version"), "{}", check.detail);
+            assert!(
+                check.detail.contains("devflow.local.toml"),
+                "{}",
+                check.detail
+            );
+        } else {
+            assert_eq!(check.status, CheckStatus::Fail, "{check:?}");
+            assert!(
+                check
+                    .remedies
+                    .iter()
+                    .any(|r| matches!(r, Remedy::OpenGuide { .. }))
+            );
+        }
+        assert!(!check.detail.contains("devflow trust"), "no command line");
     }
 
     #[test]
@@ -1615,5 +1910,130 @@ mod tests {
         assert_eq!(major_version("18.0"), Some(18));
         assert_eq!(major_version("PostgreSQL 17.4 (Debian)"), Some(17));
         assert_eq!(major_version("unknown"), None);
+    }
+    /// A stand-in `mise` that prints `stdout` for `--version` (or exits 1).
+    #[cfg(unix)]
+    fn stand_in_mise(dir: &Path, script: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.join("mise");
+        std::fs::write(&path, format!("#!/bin/sh\n{script}\n")).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+
+    fn guide_url(check: &Check) -> Option<&str> {
+        check.remedies.iter().find_map(|r| match r {
+            Remedy::OpenGuide { url } => Some(url.as_str()),
+            _ => None,
+        })
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn mise_is_judged_against_the_pin_with_the_upgrade_page_as_the_way_on() {
+        let dir = tempfile::tempdir().unwrap();
+        // Supported: the release is shown.
+        let ok = mise_tool(Some(stand_in_mise(
+            dir.path(),
+            "echo '2026.10.7 macos-arm64 (2026-10-09)'",
+        )));
+        assert_eq!(ok[0].status, CheckStatus::Ok);
+        assert!(
+            ok[0].detail.starts_with("mise 2026.10.7 at "),
+            "{}",
+            ok[0].detail
+        );
+        assert!(ok[0].remedies.is_empty());
+        // The pin itself is supported.
+        let pin = mise_tool(Some(stand_in_mise(
+            dir.path(),
+            "echo '2026.4.18 linux-x64 (2026-04-19)'",
+        )));
+        assert_eq!(pin[0].status, CheckStatus::Ok);
+        // Older: a typed warning with the page, no command line in the words.
+        let old = mise_tool(Some(stand_in_mise(
+            dir.path(),
+            "echo '2026.4.17 linux-x64 (2026-04-18)'",
+        )));
+        assert_eq!(old[0].status, CheckStatus::Warn);
+        assert!(
+            old[0]
+                .detail
+                .contains("mise 2026.4.17 is older than 2026.4.18"),
+            "{}",
+            old[0].detail
+        );
+        assert_eq!(
+            guide_url(&old[0]),
+            Some("https://mise.jdx.dev/installing-mise.html")
+        );
+        assert!(!old[0].hint.as_deref().unwrap_or("").contains('`'));
+        // A version that cannot be read is a warning too, not "fine".
+        let unreadable = mise_tool(Some(stand_in_mise(dir.path(), "echo 'dev build'")));
+        assert_eq!(unreadable[0].status, CheckStatus::Warn);
+        assert!(
+            unreadable[0].detail.contains("cannot be read"),
+            "{}",
+            unreadable[0].detail
+        );
+        assert!(guide_url(&unreadable[0]).is_some());
+        // On PATH and not running (a shim with no version configured).
+        let shim = mise_tool(Some(stand_in_mise(
+            dir.path(),
+            "echo 'mise ERROR No version is set for shim: mise' >&2; exit 1",
+        )));
+        assert_eq!(shim[0].status, CheckStatus::Warn);
+        assert!(
+            shim[0].detail.contains("does not run"),
+            "{}",
+            shim[0].detail
+        );
+        // Not on PATH at all.
+        let absent = mise_tool(None);
+        assert_eq!(absent[0].status, CheckStatus::Warn);
+        assert!(absent[0].detail.contains("not found on PATH"));
+    }
+
+    #[test]
+    fn pitchfork_is_judged_against_the_pin_and_names_how_to_upgrade_it() {
+        let detection = |version: Option<&str>| pitchfork::Detection {
+            path: Some(PathBuf::from("/usr/local/bin/pitchfork")),
+            installed: true,
+            version: version.map(str::to_string),
+            unsupported: crate::tools::judge(Tool::Pitchfork, version.unwrap_or("")).err(),
+            problem: None,
+        };
+        let ok = pitchfork_install_check(&detection(Some("2.30.1")));
+        assert_eq!(ok.status, CheckStatus::Ok);
+        let old = pitchfork_install_check(&detection(Some("2.19.0")));
+        assert_eq!(old.status, CheckStatus::Warn);
+        assert!(
+            old.detail.contains("pitchfork 2.19.0 is older than 2.20.0"),
+            "{}",
+            old.detail
+        );
+        assert_eq!(old.remedies[0], Remedy::InstallPitchfork);
+        assert_eq!(
+            guide_url(&old),
+            Some("https://github.com/jdx/pitchfork/releases")
+        );
+        assert!(!old.hint.as_deref().unwrap_or("").contains('`'));
+        let unreadable = pitchfork_install_check(&detection(None));
+        assert_eq!(unreadable.status, CheckStatus::Warn);
+        assert!(
+            unreadable.detail.contains("cannot be read"),
+            "{}",
+            unreadable.detail
+        );
+        // Missing, or on PATH and not running: the install offer, no command in the words.
+        let missing = pitchfork_install_check(&pitchfork::Detection {
+            path: None,
+            installed: false,
+            version: None,
+            unsupported: None,
+            problem: None,
+        });
+        assert_eq!(missing.remedies, [Remedy::InstallPitchfork]);
+        assert!(!missing.hint.as_deref().unwrap_or("").contains('`'));
     }
 }

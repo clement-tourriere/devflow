@@ -12,7 +12,7 @@ use super::{Confidence, ItemKind, PatchOp};
 use crate::config::EnvPreset;
 use crate::detect::{
     Engine, EnvCategory, Framework, MigrationFact, MigrationTool, PackageManager,
-    PackageManagerFact, PackageManagerSource, PythonProject, PythonTool, shell_quote,
+    PackageManagerFact, PythonProject, PythonTool, shell_quote,
 };
 use serde_json::{Value, json};
 
@@ -164,7 +164,7 @@ impl Builder<'_> {
             };
             let mut risks = Vec::new();
             let mut confidence = Confidence::High;
-            if pm.source == PackageManagerSource::Assumed {
+            if pm.assumed {
                 confidence = Confidence::Medium;
                 risks.push(
                     "No lockfile or packageManager field names the package manager; npm was \

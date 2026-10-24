@@ -1,0 +1,632 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "definitions": {
+    "BusySourcePolicy": {
+      "oneOf": [
+        {
+          "const": "disconnect",
+          "description": "Terminate sessions on the source database, then clone (bounded retries).",
+          "type": "string"
+        },
+        {
+          "const": "fail",
+          "description": "Refuse to clone a source database that has sessions.",
+          "type": "string"
+        },
+        {
+          "const": "wait",
+          "description": "Wait up to `busy_wait` for the sessions to end, then refuse naming them.",
+          "type": "string"
+        }
+      ]
+    },
+    "CowCapability": {
+      "description": "Whether cloned databases share blocks with their source.",
+      "oneOf": [
+        {
+          "const": "verified",
+          "description": "Block sharing was verified on the server's data directory.",
+          "type": "string"
+        },
+        {
+          "const": "copy",
+          "description": "Clones are full copies.",
+          "type": "string"
+        },
+        {
+          "const": "unknown",
+          "description": "Not verifiable from here (external servers).",
+          "type": "string"
+        }
+      ]
+    },
+    "DataSection": {
+      "additionalProperties": false,
+      "description": "`[data]`: seed data for runs that cannot prompt.\n\n\"Non-interactive\" is a run that cannot ask: `--non-interactive`, `--json`, no terminal, the Git hook. Such a run that was not told where the data comes from (`--data-from`) takes it from here, for every service that has a snapshot of that name, and from the service's usual default (with a warning) for one that does not.\n\nThe section decides where the data of a workspace comes from when it is created or adopted. A data source is immutable once chosen, so it is part of no generation: changing it reopens no workspace that has its data.",
+      "properties": {
+        "noninteractive_fallback": {
+          "$ref": "#/definitions/SeedFallback",
+          "description": "What a service without that snapshot does. Unset, it fails the run (with remedies): its default data source is a live workspace, and cloning one ends PostgreSQL sessions or stops MySQL. The only value is `\"empty\"`: an empty database for that service, with a warning."
+        },
+        "noninteractive_from": {
+          "description": "`snapshot:NAME` (or `snapshot:NAME@vN`): the snapshot each service seeds a non-interactive workspace from.",
+          "type": "string"
+        },
+        "noninteractive_max_age": {
+          "description": "A seed snapshot older than this (humantime, e.g. \"7d\") is still used, with a warning.",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "EnvPreset": {
+      "description": "A framework preset: a fixed set of variables rendered from the PostgreSQL binding's connection parameters.",
+      "oneOf": [
+        {
+          "const": "prisma",
+          "description": "`DIRECT_URL` (the same URL). `SHADOW_DATABASE_URL` comes with a `shadow` scratch database (`extra_databases = [\"shadow\"]`): devflow exports it itself, with the other scratch URLs, so Prisma's `shadowDatabaseUrl = env(\"SHADOW_DATABASE_URL\")` finds it whether or not this preset is on.",
+          "type": "string"
+        },
+        {
+          "const": "laravel",
+          "description": "`DB_CONNECTION`, `DB_HOST`, `DB_PORT`, `DB_DATABASE`, `DB_USERNAME`, `DB_PASSWORD`.",
+          "type": "string"
+        },
+        {
+          "const": "spring",
+          "description": "`SPRING_DATASOURCE_URL` (JDBC), `_USERNAME`, `_PASSWORD`.",
+          "type": "string"
+        },
+        {
+          "const": "sqlalchemy",
+          "description": "`SQLALCHEMY_DATABASE_URI` (`postgresql+psycopg://`).",
+          "type": "string"
+        },
+        {
+          "const": "db_parts",
+          "description": "`DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`, `DB_PASSWORD`.",
+          "type": "string"
+        }
+      ]
+    },
+    "EnvSection": {
+      "additionalProperties": {
+        "description": "A recipe: the value template of the variable named by the key. `${NAME}` references a variable devflow generates.",
+        "type": "string"
+      },
+      "description": "Extra variables for `.devflow/env`: `NAME = \"value\"` recipes built from the variables devflow generates (`${DATABASE_URL}`, `${PGHOST}`, …, one pass, no defaults, never another recipe), and framework presets. Recipes and presets are part of what `devflow trust` approves.",
+      "properties": {
+        "presets": {
+          "description": "Framework presets rendered from the PostgreSQL connection. A preset cannot set a name that a recipe or another preset sets.",
+          "items": {
+            "$ref": "#/definitions/EnvPreset"
+          },
+          "type": "array",
+          "uniqueItems": true
+        }
+      },
+      "propertyNames": {
+        "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+      },
+      "type": "object"
+    },
+    "GitHookMode": {
+      "description": "When the post-checkout hook's setup runs relative to Git.",
+      "oneOf": [
+        {
+          "const": "synchronous",
+          "description": "Git waits for the whole setup (4.3 s for a 4 s hook): the worktree is ready when `git worktree add` returns.",
+          "type": "string"
+        },
+        {
+          "const": "background",
+          "description": "`git worktree add` returns at once; the setup runs detached (its own process group, log in the worktree's Git directory). Whoever needs the workspace waits for it (`devflow wait`, `devflow setup --wait`, `devflow exec --wait`).",
+          "type": "string"
+        }
+      ]
+    },
+    "HookEntry": {
+      "anyOf": [
+        {
+          "description": "The command.",
+          "pattern": "\\S",
+          "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "name": {
+              "description": "Shown in logs and output; unique within the phase.",
+              "maxLength": 64,
+              "minLength": 1,
+              "type": "string"
+            },
+            "run": {
+              "description": "The shell command.",
+              "pattern": "\\S",
+              "type": "string"
+            },
+            "timeout": {
+              "description": "Overrides `[hooks] timeout` for this command (a duration such as \"30s\" or \"5m\").",
+              "type": "string"
+            }
+          },
+          "required": [
+            "run"
+          ],
+          "type": "object"
+        }
+      ],
+      "description": "One hook command, run with `sh -c` (no templating): a string, or a table when it deserves a name in logs and output or a timeout of its own."
+    },
+    "HooksSection": {
+      "additionalProperties": false,
+      "properties": {
+        "setup": {
+          "default": [],
+          "description": "Run once in a new (or adopted) worktree, after payloads, database and env.",
+          "items": {
+            "$ref": "#/definitions/HookEntry"
+          },
+          "type": "array"
+        },
+        "switch": {
+          "default": [],
+          "description": "Run on every `devflow switch` into an existing workspace.",
+          "items": {
+            "$ref": "#/definitions/HookEntry"
+          },
+          "type": "array"
+        },
+        "teardown": {
+          "default": [],
+          "description": "Run before removal; a failure blocks removal unless forced.",
+          "items": {
+            "$ref": "#/definitions/HookEntry"
+          },
+          "type": "array"
+        },
+        "timeout": {
+          "default": "15m",
+          "description": "Per-command timeout (humantime, e.g. \"15m\"); an entry's own `timeout` overrides it.",
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "IntegrationsSection": {
+      "additionalProperties": false,
+      "description": "`[integrations]`: the Git hook and the agent hosts.\n\nNothing here decides what a workspace holds, so it is part of no generation and of no approval: it only changes when the post-checkout hook returns.",
+      "properties": {
+        "git_hook": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/GitHookMode"
+            }
+          ],
+          "default": "synchronous",
+          "description": "What the post-checkout hook does after `git worktree add`: set the worktree up before Git returns (`\"synchronous\"`, the default), or start the setup detached and return at once (`\"background\"`)."
+        }
+      },
+      "type": "object"
+    },
+    "PitchforkSection": {
+      "additionalProperties": false,
+      "description": "`[pitchfork]`: devflow's part in starting a workspace's daemons.",
+      "properties": {
+        "autostart": {
+          "default": false,
+          "description": "Start the workspace's daemons once it is `ready` after `setup` and `switch` (and when switching into a ready one). Chosen at onboarding; off by default. Starting is still gated by the approval of the workspace's pitchfork configuration, and never happens while a daemon starts on its own (`cron`, `watch`, `boot_start`, `auto`).",
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
+    "PostgresMode": {
+      "oneOf": [
+        {
+          "const": "managed",
+          "description": "devflow runs a PostgreSQL container with `docker compose`.",
+          "type": "string"
+        },
+        {
+          "const": "external",
+          "description": "An existing PostgreSQL ≥ 18 server reached through `admin_url`.",
+          "type": "string"
+        }
+      ]
+    },
+    "ProjectSection": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "description": "Stable across machines; written by `devflow init` and committed.",
+          "format": "uuid",
+          "pattern": "^(urn:uuid:)?\\{?[0-9a-fA-F]{8}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{12}\\}?$",
+          "type": "string"
+        },
+        "name": {
+          "description": "The project's name (`{project}` in `[worktree] dir`).",
+          "pattern": "\\S",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "id"
+      ],
+      "type": "object"
+    },
+    "SeedFallback": {
+      "description": "What `[data] noninteractive_fallback` allows a service without the seed snapshot to start from.",
+      "oneOf": [
+        {
+          "const": "empty",
+          "description": "An empty database (an empty cache, an initialized MySQL).",
+          "type": "string"
+        }
+      ]
+    },
+    "ServiceConfig": {
+      "description": "One `[services.<key>]` table, selected by its `engine`.\n\nInternally tagged: `engine = \"postgres\"` plus the engine's own keys, which stay strict (`deny_unknown_fields` on the section).",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "admin_url": {
+              "description": "External mode: admin (provisioner) connection URL. `DEVFLOW_PG_ADMIN_URL` overrides it.",
+              "type": "string"
+            },
+            "app_host": {
+              "description": "Host written into workspace URLs when it differs from the admin endpoint.",
+              "type": "string"
+            },
+            "app_port": {
+              "description": "Port written into workspace URLs when it differs from the admin endpoint.",
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "bind": {
+              "default": "127.0.0.1",
+              "description": "Managed mode: address the container port is published on.",
+              "type": "string"
+            },
+            "busy_wait": {
+              "description": "With `on_busy_source = \"wait\"`: how long to wait for the source's sessions to end (humantime). Default: `30s`.",
+              "type": "string"
+            },
+            "cow": {
+              "$ref": "#/definitions/CowCapability",
+              "description": "External mode: operator declaration after checking the server's filesystem."
+            },
+            "database": {
+              "description": "Display name of the default workspace's database branch.",
+              "type": "string"
+            },
+            "engine": {
+              "const": "postgres",
+              "type": "string"
+            },
+            "extra_databases": {
+              "description": "Scratch databases every branch gets besides its own (`[\"test\", \"shadow\"]`): empty, recorded, owned like the branch's data and reachable with the branch's login. Each is exported as `<NAME>_DATABASE_URL`. Each name: a lowercase letter, then lowercase letters, digits or `_` (21 characters at most), listed once, and not main, postgres, devflow or template*.",
+              "items": {
+                "not": {
+                  "pattern": "^(main|postgres|devflow|template.*)$"
+                },
+                "pattern": "^[a-z][a-z0-9_]{0,20}$",
+                "type": "string"
+              },
+              "type": "array",
+              "uniqueItems": true
+            },
+            "image": {
+              "default": "postgres:18",
+              "description": "Managed mode: image to run; must be PostgreSQL ≥ 18.",
+              "type": "string"
+            },
+            "mode": {
+              "allOf": [
+                {
+                  "$ref": "#/definitions/PostgresMode"
+                }
+              ],
+              "default": "managed"
+            },
+            "on_busy_source": {
+              "$ref": "#/definitions/BusySourcePolicy",
+              "description": "Default: `disconnect` for a managed server bound to loopback, `fail` otherwise."
+            },
+            "port": {
+              "default": 0,
+              "description": "Managed mode: fixed host port; 0 (the default) lets devflow choose one and keep it, recorded in the server's `admin.json`.",
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "require_cow": {
+              "default": false,
+              "description": "Refuse to create branches unless CoW is verified.",
+              "type": "boolean"
+            },
+            "wal_log_below": {
+              "description": "A clone of a source smaller than this uses `STRATEGY WAL_LOG` unless copy-on-write is verified (a size like \"256MiB\"; \"0\" always uses `FILE_COPY`). Default: `256MiB`.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "engine"
+          ],
+          "title": "postgres",
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "The keys of a `valkey`, `redis` or `mysql` service. Container engines are managed only: devflow runs the containers, so there is no `mode`, `admin_url` or port to configure (each branch's host port is allocated once and kept).",
+          "properties": {
+            "engine": {
+              "const": "valkey",
+              "type": "string"
+            },
+            "env": {
+              "description": "Variable the connection URL is exported as. Default: `REDIS_URL` for `valkey` and `redis`; for `mysql` `DATABASE_URL`, or `MYSQL_URL` when the project also has a postgres service.",
+              "pattern": "^[A-Za-z_][A-Za-z0-9_]*$",
+              "type": "string"
+            },
+            "image": {
+              "description": "Image to run, by tag or digest. Default: `valkey/valkey:8-alpine`, `redis:8-alpine` or `mysql:8.4`. A branch pins the image digest it was created with.",
+              "pattern": "^[^\\s-]\\S*$",
+              "type": "string"
+            },
+            "require_cow": {
+              "description": "Refuse to clone unless the filesystem shares blocks (reflink); without it a full copy is allowed and reported as `copy`.",
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "engine"
+          ],
+          "title": "valkey",
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "The keys of a `valkey`, `redis` or `mysql` service. Container engines are managed only: devflow runs the containers, so there is no `mode`, `admin_url` or port to configure (each branch's host port is allocated once and kept).",
+          "properties": {
+            "engine": {
+              "const": "redis",
+              "type": "string"
+            },
+            "env": {
+              "description": "Variable the connection URL is exported as. Default: `REDIS_URL` for `valkey` and `redis`; for `mysql` `DATABASE_URL`, or `MYSQL_URL` when the project also has a postgres service.",
+              "pattern": "^[A-Za-z_][A-Za-z0-9_]*$",
+              "type": "string"
+            },
+            "image": {
+              "description": "Image to run, by tag or digest. Default: `valkey/valkey:8-alpine`, `redis:8-alpine` or `mysql:8.4`. A branch pins the image digest it was created with.",
+              "pattern": "^[^\\s-]\\S*$",
+              "type": "string"
+            },
+            "require_cow": {
+              "description": "Refuse to clone unless the filesystem shares blocks (reflink); without it a full copy is allowed and reported as `copy`.",
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "engine"
+          ],
+          "title": "redis",
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "The keys of a `valkey`, `redis` or `mysql` service. Container engines are managed only: devflow runs the containers, so there is no `mode`, `admin_url` or port to configure (each branch's host port is allocated once and kept).",
+          "properties": {
+            "database": {
+              "description": "`mysql` only: the database every branch of the service has (the schema its application account owns). Default: the project name as an identifier. Branches cloned from existing data keep the name that data has.",
+              "pattern": "^[a-z][a-z0-9_]{0,47}$",
+              "type": "string"
+            },
+            "engine": {
+              "const": "mysql",
+              "type": "string"
+            },
+            "env": {
+              "description": "Variable the connection URL is exported as. Default: `REDIS_URL` for `valkey` and `redis`; for `mysql` `DATABASE_URL`, or `MYSQL_URL` when the project also has a postgres service.",
+              "pattern": "^[A-Za-z_][A-Za-z0-9_]*$",
+              "type": "string"
+            },
+            "image": {
+              "description": "Image to run, by tag or digest. Default: `valkey/valkey:8-alpine`, `redis:8-alpine` or `mysql:8.4`. A branch pins the image digest it was created with.",
+              "pattern": "^[^\\s-]\\S*$",
+              "type": "string"
+            },
+            "require_cow": {
+              "description": "Refuse to clone unless the filesystem shares blocks (reflink); without it a full copy is allowed and reported as `copy`.",
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "engine"
+          ],
+          "title": "mysql",
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "The keys of a `sqlite` service. The database is a file in the workspace: nothing runs and nothing is configured about a server, a port or an image.",
+          "properties": {
+            "busy_wait": {
+              "description": "How long a clone waits for a writer to release the source file (humantime, e.g. \"30s\"); then it is refused rather than copied while it changes. Default: `30s`.",
+              "type": "string"
+            },
+            "engine": {
+              "const": "sqlite",
+              "type": "string"
+            },
+            "env": {
+              "description": "Variable the `sqlite:` URL of the file is exported as. Default: `DATABASE_URL`, or `SQLITE_URL` when another service claims `DATABASE_URL` (a postgres service, or a mysql service without an `env` of its own when there is no postgres service).",
+              "pattern": "^[A-Za-z_][A-Za-z0-9_]*$",
+              "type": "string"
+            },
+            "path": {
+              "description": "The database file, relative to the worktree (`db/development.sqlite3`). Each workspace has its own, at the same relative path: a workspace's file is cloned from its source's when the workspace is set up. The file need not exist yet in a project that has not created it.",
+              "minLength": 1,
+              "not": {
+                "pattern": "^/|(^|/)\\.\\.(/|$)|/$"
+              },
+              "type": "string"
+            },
+            "path_env": {
+              "description": "Variable the absolute path of the file is exported as. Default: `SQLITE_PATH`. Recipes can build any other form from it (`sqlite:///${SQLITE_PATH}` for SQLAlchemy, `file:${SQLITE_PATH}` for Prisma).",
+              "pattern": "^[A-Za-z_][A-Za-z0-9_]*$",
+              "type": "string"
+            },
+            "require_cow": {
+              "description": "Refuse to clone unless the file system shares blocks (reflink); without it a full copy is allowed and reported as `copy`.",
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "engine",
+            "path"
+          ],
+          "title": "sqlite",
+          "type": "object"
+        }
+      ]
+    },
+    "WorktreeSection": {
+      "additionalProperties": false,
+      "properties": {
+        "checkout": {
+          "description": "Machine-local: only devflow.local.toml may set it (it chooses who checks worktrees out, and `git` authorizes Git's own filters and hooks), so a committed file that sets it is a configuration error.",
+          "not": {}
+        },
+        "copy": {
+          "default": [],
+          "description": "Paths cloned from the source worktree into new worktrees when present.",
+          "items": {
+            "minLength": 1,
+            "not": {
+              "pattern": "^/|(^|/)\\.\\.(/|$)"
+            },
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "dir": {
+          "default": "../{repo}.worktrees",
+          "description": "Parent directory for new worktrees, relative to the main checkout. `{project}` and `{repo}` expand to the project name and the main checkout's directory name.",
+          "type": "string"
+        },
+        "focus_ports": {
+          "description": "The loopback ports `devflow focus` forwards to the focused workspace when none is named (an OAuth callback registered for `http://localhost:3000`, say).",
+          "items": {
+            "maximum": 65535,
+            "minimum": 1024,
+            "type": "integer"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "port_range": {
+          "description": "The ports `DEVFLOW_PORT` is chosen from, `[first, last]` inclusive, with 1024 <= first <= last <= 65535 (default `[40000, 49999]`). A port a workspace already has is kept whatever this says now.",
+          "items": {
+            "maximum": 65535,
+            "minimum": 1024,
+            "type": "integer"
+          },
+          "maxItems": 2,
+          "minItems": 2,
+          "type": "array"
+        }
+      },
+      "type": "object"
+    }
+  },
+  "description": "devflow 1.0 project configuration (devflow.toml or .devflow.toml), committed at the repository root. Generated from the configuration types by `devflow config schema`; a document can pass it and still be refused (durations, at most one postgres and one mysql service, two services exporting one variable, `${NAME}` references).",
+  "properties": {
+    "data": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/DataSection"
+        }
+      ],
+      "description": "Where the data of workspaces nobody can be asked about comes from."
+    },
+    "env": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/EnvSection"
+        }
+      ],
+      "description": "Extra variables for `.devflow/env`: recipes built from devflow's own variables, and framework presets."
+    },
+    "hooks": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/HooksSection"
+        }
+      ],
+      "default": {
+        "setup": [],
+        "switch": [],
+        "teardown": [],
+        "timeout": "15m"
+      },
+      "description": "Shell commands (`sh -c`) run in a workspace, gated by `devflow trust`. Write them so that running them twice is safe."
+    },
+    "integrations": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/IntegrationsSection"
+        }
+      ],
+      "description": "How devflow works with the tools that create worktrees."
+    },
+    "pitchfork": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/PitchforkSection"
+        }
+      ],
+      "description": "How devflow treats the project's pitchfork daemons."
+    },
+    "project": {
+      "$ref": "#/definitions/ProjectSection",
+      "description": "The project's identity: its name and the id that ties trust, the registry and the database server to it across machines."
+    },
+    "services": {
+      "additionalProperties": {
+        "$ref": "#/definitions/ServiceConfig"
+      },
+      "description": "Services by key (`[services.db]`), each selected by its `engine`. The key names the service in receipts and output: a lowercase letter, then lowercase letters, digits, `_` or `-`, at most 31 characters (a container or sqlite service cannot be named status, up, down, url, list, snapshot, reset, reconcile, forget, help). At most one `postgres` and one `mysql` service.",
+      "propertyNames": {
+        "pattern": "^[a-z][a-z0-9_-]{0,30}$"
+      },
+      "type": "object"
+    },
+    "worktree": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/WorktreeSection"
+        }
+      ],
+      "default": {
+        "copy": [],
+        "dir": "../{repo}.worktrees"
+      },
+      "description": "Where new worktrees go and what they take with them."
+    }
+  },
+  "required": [
+    "project"
+  ],
+  "title": "devflow.toml",
+  "type": "object"
+}

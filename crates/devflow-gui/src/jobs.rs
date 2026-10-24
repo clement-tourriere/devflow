@@ -630,6 +630,8 @@ pub struct Refreshed {
     pub services: ServicesModel,
     pub trust: Section<TrustState>,
     pub pitchfork: Option<PitchforkModel>,
+    /// The project's focus; `None` when it could not be read.
+    pub focus: Option<devflow_core::focus::Status>,
     pub config: Option<Section<ConfigDocument>>,
     pub logs: Option<LogsModel>,
 }
@@ -680,6 +682,7 @@ pub fn refresh(request: RefreshRequest) -> Result<Refreshed, LoadError> {
             .map(|target| target.path.as_path()),
         request.processes,
     );
+    let focus = catch(|| devflow_core::focus::status_unprobed(&project)).ok();
     let config = request
         .load_config
         .then(|| catch(|| ConfigDocument::open(&request.root)));
@@ -694,6 +697,7 @@ pub fn refresh(request: RefreshRequest) -> Result<Refreshed, LoadError> {
         services,
         trust,
         pitchfork,
+        focus,
         config,
         logs,
     })
@@ -761,7 +765,7 @@ fn missing(problem: Option<String>) -> Detection {
         path: None,
         installed: false,
         version: None,
-        missing_features: Vec::new(),
+        unsupported: None,
         problem,
     }
 }

@@ -901,7 +901,7 @@ fn two_clean_ups_of_one_workspace_do_not_run_at_once() {
         .unwrap()
         .target()
         .unwrap();
-    let held = ledger::try_removal_lock(&t.project.git_common_dir, receipt.instance_id)
+    let held = ledger::try_instance_lock(&t.project.git_common_dir, receipt.instance_id)
         .unwrap()
         .unwrap();
     let outcome = remove(
@@ -1405,4 +1405,753 @@ fn a_namespace_in_doubt_is_cleared_only_by_a_listing_that_was_read_and_came_back
             .unwrap()
             .is_none()
     );
+}
+
+/// A directory that can be listed but not searched: what is inside it cannot be
+/// inspected (`PermissionDenied`), which says nothing about whether it is there.
+/// Restored on drop. `None` where permissions do not bind (root, or a platform
+/// without them).
+#[cfg(unix)]
+struct Unsearchable {
+    dir: PathBuf,
+}
+
+#[cfg(unix)]
+impl Unsearchable {
+    fn make(dir: &Path, probe: &Path) -> Option<Unsearchable> {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o444)).unwrap();
+        let guard = Unsearchable {
+            dir: dir.to_path_buf(),
+        };
+        let binds = std::fs::symlink_metadata(probe)
+            .is_err_and(|e| e.kind() != std::io::ErrorKind::NotFound)
+            && std::fs::read_dir(dir).is_ok();
+        binds.then_some(guard)
+    }
+}
+
+#[cfg(unix)]
+impl Drop for Unsearchable {
+    fn drop(&mut self) {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&self.dir, std::fs::Permissions::from_mode(0o755));
+    }
+}
+
+/// A repository copied to another machine at the same absolute path (Migration
+/// Assistant, a restored backup) keeps every path and gets other directories:
+/// its copied records name branches on servers it may share with the original,
+/// and the path proves nothing.
+#[test]
+fn a_record_copied_to_the_same_path_never_acquires_the_right_to_delete() {
+    let t = repo(None);
+    let gone = |name: &str| removed_elsewhere(&t, name, true);
+    let ghost = gone("restored");
+    let blank = gone("blank");
+    let fine = gone("fine");
+    // The same path, another directory: created at another time.
+    rewrite(&t, ghost.instance_id, |r| {
+        r.checkout.identity = Some("12345:678".into())
+    });
+    // The same path, a record that does not say which directory it was for.
+    rewrite(&t, blank.instance_id, |r| r.checkout.identity = None);
+    let inventory = inventory(
+        &t.project,
+        &Options {
+            backfill: true,
+            ..quick()
+        },
+    )
+    .unwrap();
+    assert_eq!(class_of(&inventory, &fine), Class::RemovedElsewhere);
+    for receipt in [&ghost, &blank] {
+        let entry = inventory.entry(receipt.instance_id).unwrap();
+        assert_eq!(entry.class, Class::Unknown, "{}", receipt.workspace);
+        assert!(
+            matches!(&entry.cause, Some(Cause::OtherCheckout { common_dir }) if *common_dir == t.project.git_common_dir),
+            "{:?}",
+            entry.cause
+        );
+        assert!(!entry.removable && entry.rebindable());
+        assert!(
+            entry
+                .reason
+                .as_deref()
+                .unwrap()
+                .contains("copied or restored to this path"),
+            "{:?}",
+            entry.reason
+        );
+        assert!(
+            entry
+                .remedies
+                .iter()
+                .any(|r| matches!(r, Remedy::RebindRecord { instance, .. } if Some(*instance) == entry.instance)),
+            "{:?}",
+            entry.remedies
+        );
+    }
+    // The inventory, even when allowed to write, did not touch them.
+    assert_eq!(
+        ledger::read(&t.project.git_common_dir, ghost.instance_id)
+            .unwrap()
+            .unwrap()
+            .checkout
+            .identity
+            .as_deref(),
+        Some("12345:678")
+    );
+    // Asked for by name, forced: nothing happens to them.
+    let fake = Fake::new();
+    let targets: Vec<Target> = [&ghost, &blank]
+        .iter()
+        .map(|r| Target {
+            instance: r.instance_id,
+            generation: ledger::read(&t.project.git_common_dir, r.instance_id)
+                .unwrap()
+                .unwrap()
+                .generation(),
+            backend: Vec::new(),
+        })
+        .collect();
+    let outcome = remove(
+        &t.project,
+        &RemoveRequest {
+            targets,
+            force: true,
+            pitchfork: Some(fake.pitchfork()),
+            ..RemoveRequest::default()
+        },
+        &mut |_| {},
+    )
+    .unwrap();
+    assert!(outcome.removed.is_empty(), "{:?}", outcome.removed);
+    assert_eq!(outcome.skipped.len(), 2);
+    assert!(fake.stops().is_empty());
+    for receipt in [&ghost, &blank] {
+        assert!(
+            ledger::read(&t.project.git_common_dir, receipt.instance_id)
+                .unwrap()
+                .is_some()
+        );
+    }
+}
+
+/// A receipt written in the copy is no proof either: the record's checkout is
+/// not replaced by a refresh, whatever the receipt says.
+#[test]
+fn a_receipt_write_never_replaces_the_checkout_a_record_was_written_for() {
+    let t = repo(None);
+    let (ws, receipt) = workspace(&t, "live", false);
+    let before = ledger::read(&t.project.git_common_dir, receipt.instance_id)
+        .unwrap()
+        .unwrap();
+    assert!(before.checkout.identity.is_some() || cfg!(not(unix)));
+
+    // The record is another directory's (a restored copy).
+    rewrite(&t, receipt.instance_id, |r| {
+        r.checkout.identity = Some("12345:678".into())
+    });
+    receipt.save(&ws.git_dir).unwrap();
+    let after = ledger::read(&t.project.git_common_dir, receipt.instance_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(after.checkout.identity.as_deref(), Some("12345:678"));
+    assert_eq!(after.checkout.common_dir, before.checkout.common_dir);
+    let inventory = inventory(&t.project, &quick()).unwrap();
+    let entry = inventory.entry(receipt.instance_id).unwrap();
+    assert_eq!(entry.class, Class::Unknown);
+    assert!(entry.rebindable() && !entry.removable);
+
+    // Not even a blank is filled in: a record that does not say which
+    // directory it was written for proves nothing, and a copy's receipt is not
+    // the proof either.
+    rewrite(&t, receipt.instance_id, |r| r.checkout.identity = None);
+    receipt.save(&ws.git_dir).unwrap();
+    let still_blank = ledger::read(&t.project.git_common_dir, receipt.instance_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(still_blank.checkout.identity, None);
+
+    // A record of this very directory, moved, is followed by the receipt.
+    rewrite(&t, receipt.instance_id, |r| {
+        r.checkout.identity = before.checkout.identity.clone();
+        r.checkout.common_dir = "/nowhere/before-the-move/shop/.git".into();
+    });
+    receipt.save(&ws.git_dir).unwrap();
+    let followed = ledger::read(&t.project.git_common_dir, receipt.instance_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(followed.checkout, before.checkout);
+}
+
+/// The person's confirmation is the one way out, and it changes whose record
+/// it is and removes nothing.
+#[test]
+fn a_record_the_person_confirms_belongs_here_is_judged_like_any_other() {
+    let t = repo(None);
+    let ghost = removed_elsewhere(&t, "bound", false);
+    rewrite(&t, ghost.instance_id, |r| {
+        r.checkout.identity = Some("12345:678".into());
+        r.resources.daemons.push(format!("{}/web", ghost.slug()));
+    });
+    let shown = inventory(&t.project, &quick())
+        .unwrap()
+        .entry(ghost.instance_id)
+        .unwrap()
+        .target()
+        .unwrap();
+    let ask = |target: Target| {
+        rebind(
+            &t.project,
+            &RebindRequest {
+                targets: vec![target],
+            },
+            &mut |_| {},
+        )
+        .unwrap()
+    };
+
+    // Another operation on it: left alone, asked again later.
+    let held = ledger::try_instance_lock(&t.project.git_common_dir, ghost.instance_id)
+        .unwrap()
+        .unwrap();
+    let outcome = ask(shown.clone());
+    assert!(outcome.rebound.is_empty() && outcome.skipped[0].busy);
+    drop(held);
+
+    // The record changed since it was shown.
+    let stale = Target {
+        generation: "0".into(),
+        ..shown.clone()
+    };
+    let outcome = ask(stale);
+    assert!(outcome.skipped[0].reason.contains("changed since"));
+    assert!(
+        ledger::read(&t.project.git_common_dir, ghost.instance_id)
+            .unwrap()
+            .unwrap()
+            .checkout
+            .identity
+            .as_deref()
+            == Some("12345:678"),
+        "nothing was bound"
+    );
+
+    let outcome = ask(shown.clone());
+    assert_eq!(outcome.rebound.len(), 1, "{:?}", outcome.skipped);
+    assert_eq!(outcome.rebound[0].class, Class::RemovedElsewhere);
+    assert_eq!(outcome.rebound[0].from, t.project.git_common_dir);
+    let record = ledger::read(&t.project.git_common_dir, ghost.instance_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        record.checkout.identity,
+        ledger::repository_identity(&t.project.git_common_dir)
+    );
+    assert!(record.journal.iter().any(|entry| {
+        matches!(entry.effect, ledger::Effect::Rebind { .. })
+            && entry.outcome == ledger::Outcome::Done
+    }));
+    assert!(
+        !record.resources.daemons.is_empty(),
+        "binding removes nothing and releases nothing"
+    );
+
+    // Nothing is left to bind, and the ordinary clean-up now applies to it.
+    let again = ask(shown);
+    assert!(again.rebound.is_empty());
+    let fake = Fake::new();
+    let now = inventory(&t.project, &quick())
+        .unwrap()
+        .entry(ghost.instance_id)
+        .unwrap()
+        .clone();
+    assert!(now.removable && !now.rebindable());
+    let outcome = remove(
+        &t.project,
+        &RemoveRequest {
+            targets: vec![now.target().unwrap()],
+            pitchfork: Some(fake.pitchfork()),
+            ..RemoveRequest::default()
+        },
+        &mut |_| {},
+    )
+    .unwrap();
+    assert_eq!(outcome.removed.len(), 1, "{:?}", outcome.skipped);
+}
+
+/// Only "not found" is absence. A path that cannot be inspected, a checkout Git
+/// cannot open, a repository that cannot be looked for at its old place: none of
+/// it is "gone", and what is not known is never removable.
+#[cfg(unix)]
+#[test]
+fn what_cannot_be_inspected_is_never_taken_for_gone() {
+    let t = repo(None);
+
+    // An unregistered checkout under a parent that can be listed but not
+    // searched: `read_dir(parent)` works and the checkout's metadata fails.
+    let hidden = removed_elsewhere(&t, "hidden", true);
+    let outer = tempfile::tempdir().unwrap();
+    let host = outer.path().join("host");
+    std::fs::create_dir_all(host.join("wt")).unwrap();
+    let place = host.join("wt");
+    rewrite(&t, hidden.instance_id, |r| {
+        r.worktree = place.clone();
+        r.fingerprint = None;
+    });
+    let Some(guard) = Unsearchable::make(&host, &place) else {
+        eprintln!("permissions do not bind here (root?): the inspection error cannot be made");
+        return;
+    };
+    let shown = inventory(&t.project, &quick()).unwrap();
+    let entry = shown.entry(hidden.instance_id).unwrap();
+    assert_eq!(entry.class, Class::Unknown, "{entry:?}");
+    assert!(
+        matches!(&entry.cause, Some(Cause::Uninspectable { path }) if *path == place),
+        "{:?}",
+        entry.cause
+    );
+    assert!(!entry.removable);
+    assert!(
+        !summary(&t.project)
+            .unwrap()
+            .removed_elsewhere
+            .contains(&"hidden".to_string())
+    );
+    // Forced, by name: refused.
+    let target = Target {
+        instance: hidden.instance_id,
+        generation: ledger::read(&t.project.git_common_dir, hidden.instance_id)
+            .unwrap()
+            .unwrap()
+            .generation(),
+        backend: Vec::new(),
+    };
+    let outcome = remove(
+        &t.project,
+        &RemoveRequest {
+            targets: vec![target],
+            force: true,
+            pitchfork: Some(Fake::new().pitchfork()),
+            ..RemoveRequest::default()
+        },
+        &mut |_| {},
+    )
+    .unwrap();
+    assert!(outcome.removed.is_empty());
+    assert!(place.exists() || std::fs::symlink_metadata(&place).is_err());
+    drop(guard);
+    assert!(place.is_dir(), "the checkout is untouched");
+
+    // The same repository (by its identity) whose old place cannot be looked
+    // at: not "moved", because the old place is not known to be gone.
+    let moved = removed_elsewhere(&t, "elsewhere", false);
+    let old_home = outer.path().join("old-home");
+    std::fs::create_dir_all(old_home.join("repo")).unwrap();
+    let old_common = old_home.join("repo").join(".git");
+    rewrite(&t, moved.instance_id, |r| {
+        r.checkout.common_dir = old_common.clone();
+    });
+    let _guard = Unsearchable::make(&old_home, &old_common).unwrap();
+    let shown = inventory(&t.project, &quick()).unwrap();
+    let entry = shown.entry(moved.instance_id).unwrap();
+    assert_eq!(entry.class, Class::Unknown, "{entry:?}");
+    assert!(
+        matches!(&entry.cause, Some(Cause::Uninspectable { path }) if *path == old_common),
+        "{:?}",
+        entry.cause
+    );
+}
+
+/// A registered worktree whose directory is there but that Git cannot open as
+/// a checkout is not a missing directory.
+#[test]
+fn a_checkout_git_cannot_open_is_not_a_missing_directory() {
+    let t = repo(None);
+    let (ws, receipt) = workspace(&t, "broken", false);
+    std::fs::write(ws.path.join(".git"), "not a gitdir pointer").unwrap();
+    assert!(
+        worktree::list(&t.project)
+            .unwrap()
+            .iter()
+            .any(|w| w.name == "broken" && w.missing),
+        "Git's listing calls it missing"
+    );
+    let shown = inventory(&t.project, &quick()).unwrap();
+    let entry = shown.entry(receipt.instance_id).unwrap();
+    assert_eq!(entry.class, Class::Unknown, "{entry:?}");
+    assert!(
+        matches!(&entry.cause, Some(Cause::CheckoutNotOpenable { path }) if *path == ws.path),
+        "{:?}",
+        entry.cause
+    );
+    assert!(!entry.removable);
+    assert!(
+        !summary(&t.project)
+            .unwrap()
+            .missing
+            .contains(&"broken".to_string())
+    );
+}
+
+/// A setup that saved a pending branch and is about to create it must not have
+/// the instance's record settled and deleted under it by a clean-up of a worktree
+/// the host removed meanwhile: the instance lock lives in the common Git
+/// directory, which the host's removal does not touch.
+#[test]
+fn a_clean_up_leaves_an_instance_alone_while_a_setup_holds_it() {
+    let t = repo(None);
+    let receipt = removed_elsewhere(&t, "being-set-up", true);
+    let target = inventory(&t.project, &quick())
+        .unwrap()
+        .entry(receipt.instance_id)
+        .unwrap()
+        .target()
+        .unwrap();
+    let before =
+        std::fs::read(ledger::path(&t.project.git_common_dir, receipt.instance_id)).unwrap();
+    let fake = Fake::new();
+    fake.json(
+        "list.json",
+        &json!([listed(&receipt.slug(), "web", "stopped")]),
+    );
+    let request = RemoveRequest {
+        targets: vec![target],
+        force: true,
+        pitchfork: Some(fake.pitchfork()),
+        ..RemoveRequest::default()
+    };
+
+    // The setup holds it (as the setup that runs in the worktree the host just
+    // removed does, across its provisioning).
+    let held = ledger::try_instance_lock(&t.project.git_common_dir, receipt.instance_id)
+        .unwrap()
+        .unwrap();
+    let outcome = remove(&t.project, &request, &mut |_| {}).unwrap();
+    assert!(outcome.removed.is_empty(), "{:?}", outcome.removed);
+    assert!(outcome.skipped[0].busy, "{:?}", outcome.skipped);
+    assert!(!outcome.skipped[0].forceable);
+    assert!(fake.stops().is_empty());
+    assert_eq!(
+        std::fs::read(ledger::path(&t.project.git_common_dir, receipt.instance_id)).unwrap(),
+        before,
+        "the record is exactly as it was"
+    );
+    // Binding a record waits for nobody either.
+    let outcome = rebind(
+        &t.project,
+        &RebindRequest {
+            targets: request.targets.clone(),
+        },
+        &mut |_| {},
+    )
+    .unwrap();
+    assert!(outcome.skipped[0].busy);
+
+    // Once the setup is over nothing holds it, and the clean-up goes on.
+    drop(held);
+    let outcome = remove(&t.project, &request, &mut |_| {}).unwrap();
+    assert_eq!(outcome.removed.len(), 1, "{:?}", outcome.skipped);
+}
+
+/// A setup takes the lock before it records anything and holds it until it is
+/// over, so a clean-up that runs in the middle of one finds the instance busy.
+#[test]
+fn a_setup_holds_the_instance_lock_from_its_first_write_to_its_end() {
+    use crate::receipt::{Phase, PhaseState};
+    use crate::setup::Progress;
+
+    struct Probe<'a> {
+        project: &'a Project,
+        seen: Vec<(Phase, bool)>,
+        clean_up: Option<Skipped>,
+    }
+    impl Progress for Probe<'_> {
+        fn phase(&mut self, phase: Phase, state: PhaseState, _: Option<&str>) {
+            if state != PhaseState::Started {
+                return;
+            }
+            let common = &self.project.git_common_dir;
+            // The first write of the receipt is the Materialize phase being
+            // done; from then on a record exists, and the lock is taken.
+            let Some(record) = ledger::list(common).unwrap().records.pop() else {
+                self.seen.push((phase, false));
+                return;
+            };
+            let free = ledger::try_instance_lock(common, record.instance_id)
+                .unwrap()
+                .is_some();
+            self.seen.push((phase, !free));
+            if phase == Phase::Env && self.clean_up.is_none() {
+                let outcome = remove(
+                    self.project,
+                    &RemoveRequest {
+                        targets: vec![Target {
+                            instance: record.instance_id,
+                            generation: record.generation(),
+                            backend: Vec::new(),
+                        }],
+                        force: true,
+                        ..RemoveRequest::default()
+                    },
+                    &mut |_| {},
+                )
+                .unwrap();
+                self.clean_up = outcome.skipped.into_iter().next();
+            }
+        }
+        fn output(&mut self, _: &str) {}
+    }
+
+    let t = repo(None);
+    let mut probe = Probe {
+        project: &t.project,
+        seen: Vec::new(),
+        clean_up: None,
+    };
+    let outcome = crate::setup::create(
+        &t.project,
+        crate::setup::CreateRequest {
+            name: "in-flight".into(),
+            from: None,
+            base: None,
+            options: crate::setup::SetupOptions {
+                no_hooks: true,
+                ..Default::default()
+            },
+        },
+        &mut probe,
+    )
+    .unwrap();
+    let busy_at: Vec<Phase> = probe
+        .seen
+        .iter()
+        .filter(|(_, busy)| *busy)
+        .map(|(phase, _)| *phase)
+        .collect();
+    assert!(
+        busy_at.contains(&Phase::Env),
+        "held while the later phases run: {:?}",
+        probe.seen
+    );
+    let skipped = probe
+        .clean_up
+        .expect("the clean-up was asked in the middle");
+    assert!(skipped.busy, "{skipped:?}");
+    let common = &t.project.git_common_dir;
+    assert!(
+        ledger::try_instance_lock(common, outcome.receipt.instance_id)
+            .unwrap()
+            .is_some(),
+        "released when the setup is over"
+    );
+    assert!(
+        ledger::read(common, outcome.receipt.instance_id)
+            .unwrap()
+            .is_some(),
+        "the clean-up changed nothing"
+    );
+}
+
+/// An ordinary removal is an operation on the instance's data too: while
+/// another holds the instance, it changes nothing, and `force` does not lift
+/// that.
+#[test]
+fn a_removal_waits_for_no_operation_on_the_instance_and_changes_nothing() {
+    let t = repo(None);
+    let (ws, receipt) = workspace(&t, "contended", false);
+    let held = ledger::try_instance_lock(&t.project.git_common_dir, receipt.instance_id)
+        .unwrap()
+        .unwrap();
+    let error = setup::remove(
+        &t.project,
+        "contended",
+        RemoveOptions {
+            force: true,
+            pitchfork: Some(Fake::new().pitchfork()),
+            ..RemoveOptions::default()
+        },
+        &mut NoProgress,
+    )
+    .unwrap_err();
+    let refusal = error.downcast_ref::<Protected>().expect("a protection");
+    assert!(!refusal.forceable, "{refusal:?}");
+    assert!(refusal.reason.contains("working on"), "{}", refusal.reason);
+    assert!(ws.path.is_dir() && ws.git_dir.is_dir());
+    assert!(Receipt::load(&ws.git_dir).unwrap().is_some());
+    drop(held);
+    setup::remove(
+        &t.project,
+        "contended",
+        RemoveOptions {
+            pitchfork: Some(Fake::new().pitchfork()),
+            ..RemoveOptions::default()
+        },
+        &mut NoProgress,
+    )
+    .unwrap();
+    assert!(!ws.path.exists());
+}
+
+/// Resets the "no directory identities" seam when a test ends.
+struct NoIdentities;
+
+impl NoIdentities {
+    fn on() -> NoIdentities {
+        ledger::NO_IDENTITY.with(|off| off.set(true));
+        NoIdentities
+    }
+}
+
+impl Drop for NoIdentities {
+    fn drop(&mut self) {
+        ledger::NO_IDENTITY.with(|off| off.set(false));
+    }
+}
+
+/// A file system that gives no directory identity cannot tell a repository
+/// copied to the same path from the original: both sides lacking an identity
+/// proves nothing, and the person's confirmation, remembered on this machine
+/// for this path, is the way out.
+#[test]
+fn where_the_file_system_gives_no_identity_a_same_path_copy_is_unknown_until_it_is_bound() {
+    let t = repo(None);
+    let _off = NoIdentities::on();
+    let copied = removed_elsewhere(&t, "no-birth-time", true);
+    let other = removed_elsewhere(&t, "another-copy", false);
+    let record = ledger::read(&t.project.git_common_dir, copied.instance_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        record.checkout.identity, None,
+        "written without an identity"
+    );
+    assert_eq!(
+        ledger::repository_identity(&t.project.git_common_dir),
+        None,
+        "and the checkout has none"
+    );
+
+    // Both lack one, the paths agree: not proven.
+    let shown = inventory(&t.project, &quick()).unwrap();
+    for receipt in [&copied, &other] {
+        let entry = shown.entry(receipt.instance_id).unwrap();
+        assert_eq!(entry.class, Class::Unknown, "{}", receipt.workspace);
+        assert!(
+            matches!(&entry.cause, Some(Cause::OtherCheckout { common_dir }) if *common_dir == t.project.git_common_dir),
+            "{:?}",
+            entry.cause
+        );
+        assert!(!entry.removable && entry.rebindable());
+        assert!(
+            entry
+                .reason
+                .as_deref()
+                .unwrap()
+                .contains("copy cannot be told from the original"),
+            "{:?}",
+            entry.reason
+        );
+    }
+    assert!(
+        summary(&t.project).unwrap().removed_elsewhere.is_empty(),
+        "nothing is offered for clean-up"
+    );
+    let fake = Fake::new();
+    let target = |receipt: &Receipt| Target {
+        instance: receipt.instance_id,
+        generation: ledger::read(&t.project.git_common_dir, receipt.instance_id)
+            .unwrap()
+            .unwrap()
+            .generation(),
+        backend: Vec::new(),
+    };
+    let outcome = remove(
+        &t.project,
+        &RemoveRequest {
+            targets: vec![target(&copied)],
+            force: true,
+            pitchfork: Some(fake.pitchfork()),
+            ..RemoveRequest::default()
+        },
+        &mut |_| {},
+    )
+    .unwrap();
+    assert!(outcome.removed.is_empty(), "{:?}", outcome.removed);
+    assert!(fake.stops().is_empty());
+
+    // The person says it is theirs: it is remembered on this machine, for this
+    // path and this record, and the other record is as unproven as before.
+    let outcome = rebind(
+        &t.project,
+        &RebindRequest {
+            targets: vec![target(&copied)],
+        },
+        &mut |_| {},
+    )
+    .unwrap();
+    assert_eq!(outcome.rebound.len(), 1, "{:?}", outcome.skipped);
+    assert_eq!(outcome.rebound[0].class, Class::RemovedElsewhere);
+    let project = t.project.id();
+    assert!(ledger::bound_here(
+        project,
+        copied.instance_id,
+        &t.project.git_common_dir
+    ));
+    assert!(
+        !ledger::bound_here(
+            project,
+            copied.instance_id,
+            Path::new("/somewhere/else/.git")
+        ),
+        "another path is another repository"
+    );
+    assert!(!ledger::bound_here(
+        project,
+        other.instance_id,
+        &t.project.git_common_dir
+    ));
+    let shown = inventory(&t.project, &quick()).unwrap();
+    assert_eq!(class_of(&shown, &copied), Class::RemovedElsewhere);
+    assert_eq!(class_of(&shown, &other), Class::Unknown);
+
+    // A copy of the repository carries the record but not this machine's
+    // confirmation: forget it, as another machine would never have had it.
+    let binding = crate::paths::data_dir()
+        .unwrap()
+        .join("record-bindings")
+        .join(project.to_string())
+        .join(format!("{}.json", copied.instance_id));
+    std::fs::remove_file(&binding).unwrap();
+    let shown = inventory(&t.project, &quick()).unwrap();
+    assert_eq!(class_of(&shown, &copied), Class::Unknown);
+    // Confirmed again, it is cleaned up like any other, and the confirmation
+    // goes with the record.
+    let again = rebind(
+        &t.project,
+        &RebindRequest {
+            targets: vec![target(&copied)],
+        },
+        &mut |_| {},
+    )
+    .unwrap();
+    assert_eq!(again.rebound.len(), 1, "{:?}", again.skipped);
+    fake.json(
+        "list.json",
+        &json!([listed(&copied.slug(), "web", "stopped")]),
+    );
+    let outcome = remove(
+        &t.project,
+        &RemoveRequest {
+            targets: vec![target(&copied)],
+            pitchfork: Some(fake.pitchfork()),
+            ..RemoveRequest::default()
+        },
+        &mut |_| {},
+    )
+    .unwrap();
+    assert_eq!(outcome.removed.len(), 1, "{:?}", outcome.skipped);
+    assert!(!binding.exists(), "the confirmation went with the record");
 }

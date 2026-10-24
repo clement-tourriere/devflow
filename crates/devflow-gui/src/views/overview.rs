@@ -66,13 +66,32 @@ impl Saved {
     }
 }
 
-/// One data service and its branches.
+/// One data service and its branches (or, for a SQLite file, its databases).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ServiceLine {
     pub key: String,
     pub engine: String,
+    /// A database that is a file in each workspace: `branches` counts the
+    /// files that exist, and the line says "databases".
+    pub file: bool,
     /// `None` when they could not be counted: never zero.
     pub branches: Option<usize>,
+}
+
+impl ServiceLine {
+    /// "3 branches", "1 database", or that they could not be counted.
+    pub fn count_text(&self) -> String {
+        let (one, many) = if self.file {
+            ("1 database", "databases")
+        } else {
+            ("1 branch", "branches")
+        };
+        match self.branches {
+            Some(1) => one.to_string(),
+            Some(n) => format!("{n} {many}"),
+            None => format!("{many} unavailable"),
+        }
+    }
 }
 
 /// What is known of the project's processes.
@@ -330,6 +349,7 @@ pub(super) fn numbers(
                 .and_then(|p| p.config.postgres().map(|(k, _)| k.to_string()))
                 .unwrap_or_else(|| "db".to_string()),
             engine: "postgres".to_string(),
+            file: false,
             // An unreachable server lists nothing, which is not "no branches".
             branches: (model.database.error.is_none()
                 && model
@@ -343,7 +363,14 @@ pub(super) fn numbers(
     services.extend(model.services.counts.iter().map(|c| ServiceLine {
         key: c.key.clone(),
         engine: c.engine.clone(),
+        file: false,
         branches: c.known.then_some(c.branches),
+    }));
+    services.extend(model.services.sqlite.iter().map(|s| ServiceLine {
+        key: s.key.clone(),
+        engine: devflow_core::config::Engine::Sqlite.as_str().to_string(),
+        file: true,
+        branches: s.database_count(),
     }));
     let (processes, readable) = process_reading(model);
     let daemons_running = readable
@@ -506,11 +533,7 @@ impl Render for OverviewView {
                             .child(line.key.clone()),
                     )
                     .child(chip(line.engine.clone(), Tone::Info, cx))
-                    .child(div().text_color(muted).child(match line.branches {
-                        Some(1) => "1 branch".to_string(),
-                        Some(n) => format!("{n} branches"),
-                        None => "branches unavailable".to_string(),
-                    }))
+                    .child(div().text_color(muted).child(line.count_text()))
             }))
             .when(numbers.services.is_empty(), |col| {
                 col.child(

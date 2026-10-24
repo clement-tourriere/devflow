@@ -3,7 +3,7 @@
 //! It is hosted in a dialog, which is outside the shell's view tree, so a
 //! choice is applied from `on_confirm` straight on the app state rather than
 //! by dispatching an action from inside the dialog.
-use super::{db_dialogs, doctor, processes, service_dialogs, ui};
+use super::{db_dialogs, doctor, processes, service_dialogs, sqlite_dialogs, ui};
 use crate::{
     actions::{NewWorkspace, OpenPalette, OpenSettings, Refresh, ToggleTheme, tab_action},
     model::{Page, ProcessTarget, Tab, shorten_home},
@@ -82,21 +82,28 @@ impl PaletteAction {
             Self::RestartProcesses(target) => processes::restart(state, target.clone(), window, cx),
             Self::OpenUrl(url) => cx.open_url(url),
             Self::SnapshotData => match data_target(state.read(cx)) {
-                Some((_, true)) => db_dialogs::open_snapshot(state, window, cx),
-                Some((key, false)) => {
+                Some((_, DataKind::Postgres)) => db_dialogs::open_snapshot(state, window, cx),
+                Some((key, kind)) => {
                     // Captured now: the dialog is for the project open at this click.
                     if let Some(project) = state.read(cx).selected_project_ref() {
                         let target = ServiceTarget { project, key };
-                        service_dialogs::open_snapshot(state, target, None, window, cx)
+                        match kind {
+                            // A file is snapshotted by workspace: the dialog
+                            // offers those that have one.
+                            DataKind::File => {
+                                sqlite_dialogs::open_snapshot(state, target, None, window, cx)
+                            }
+                            _ => service_dialogs::open_snapshot(state, target, None, window, cx),
+                        }
                     }
                 }
                 None => {}
             },
             Self::ResetData => match data_target(state.read(cx)) {
-                Some((_, true)) => db_dialogs::open_reset(state, window, cx),
-                Some((key, false)) => state.update(cx, |s, cx| {
-                    // A container branch is reset from its row, which knows
-                    // the workspace; go there.
+                Some((_, DataKind::Postgres)) => db_dialogs::open_reset(state, window, cx),
+                Some((key, _)) => state.update(cx, |s, cx| {
+                    // A container branch or a SQLite file is reset from its
+                    // row, which knows the workspace; go there.
                     s.select_data_service(key, cx);
                     s.go_to_tab(Tab::Data, cx);
                 }),
@@ -118,9 +125,20 @@ impl PaletteAction {
     }
 }
 
-/// The data service the Data tab shows, and whether it is PostgreSQL, when
-/// some workspace has data of its own to act on.
-fn data_target(state: &AppState) -> Option<(String, bool)> {
+/// What kind of data service a palette action acts on: each has its own
+/// dialogs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DataKind {
+    Postgres,
+    /// A branch in a container (Valkey, Redis, MySQL).
+    Container,
+    /// A database that is a file in each workspace (SQLite).
+    File,
+}
+
+/// The data service the Data tab shows, and what kind it is, when some
+/// workspace has data of its own to act on.
+fn data_target(state: &AppState) -> Option<(String, DataKind)> {
     let model = state.selection.current()?;
     let has_data = model.workspaces.iter().any(|w| {
         w.receipt.as_ref().is_some_and(|r| {
@@ -133,10 +151,16 @@ fn data_target(state: &AppState) -> Option<(String, bool)> {
         return None;
     }
     let key = state.selected_data_service()?;
-    let postgres = super::data_cards(model)
-        .iter()
-        .any(|c| c.key == key && c.postgres);
-    Some((key, postgres))
+    let cards = super::data_cards(model);
+    let card = cards.iter().find(|c| c.key == key)?;
+    let kind = if card.postgres {
+        DataKind::Postgres
+    } else if card.file {
+        DataKind::File
+    } else {
+        DataKind::Container
+    };
+    Some((key, kind))
 }
 
 /// The process actions the palette lists for the loaded project, with the
@@ -769,7 +793,7 @@ mod tests {
             path: None,
             installed: false,
             version: None,
-            missing_features: Vec::new(),
+            unsupported: None,
             problem: None,
         });
         let groups = groups(&state);

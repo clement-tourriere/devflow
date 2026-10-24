@@ -115,6 +115,8 @@ pub struct EnvPreview {
 /// generated for `workspace` (read from its receipt; nothing is written and
 /// no server is contacted). `None` when the workspace has no receipt yet.
 pub fn preview_env(project: &Project, workspace: &Workspace) -> Result<Option<EnvPreview>> {
+    // The recipes this workspace runs (its own branch's, or the default's).
+    let project = &*project.at(&workspace.path);
     let Some(receipt) = setup::receipt(project, workspace)? else {
         return Ok(None);
     };

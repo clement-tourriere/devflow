@@ -333,7 +333,8 @@ fn next_steps(report: &ApplyReport, plan: &Proposal, selection: &Selection) -> V
     let names: Vec<&str> = report.files.iter().map(|f| f.file.as_str()).collect();
     if !names.is_empty() {
         steps.push(format!(
-            "Review {} and commit {}.",
+            "Review {} and commit {}: a workspace runs the hooks and [env] of its own branch's \
+             devflow.toml, so one made before it is committed has none.",
             if names.len() == 1 { "it" } else { "them" },
             names.join(", ")
         ));

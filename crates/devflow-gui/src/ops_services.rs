@@ -1,5 +1,6 @@
 //! The container services' actions on `AppState`: start and stop a branch,
-//! snapshots, reset, reconcile, drop and forget. Each is a job on the
+//! snapshots, reset, reconcile, drop and forget, and the same for a `sqlite`
+//! service's database files (snapshot, delete, reset, drop). Each is a job on the
 //! background executor like the workspace operations: the project is locked
 //! while it runs, its progress goes to the activity log, and its result is a
 //! notification. They call [`ServiceBackend`] (core, outside tests) and decide
@@ -12,7 +13,12 @@ use crate::{
     state::AppState,
 };
 use anyhow::Result;
-use devflow_core::{db::DataSource, project::Project, setup::Progress as _, worktree::Workspace};
+use devflow_core::{
+    db::DataSource,
+    project::Project,
+    setup::{BranchExpect, Progress as _},
+    worktree::Workspace,
+};
 use gpui_kit::{
     ClipboardItem, Context, Window,
     component::{WindowExt as _, notification::Notification},
@@ -428,6 +434,157 @@ impl AppState {
                 Ok(Done {
                     summary: format!("Copy-on-write on this Docker engine: {word}"),
                     warnings: cow.note.into_iter().collect(),
+                    ..Done::default()
+                })
+            },
+        );
+    }
+
+    /// Take a consistent copy of a workspace's SQLite database as the next
+    /// version of snapshot `name`. `expect` is what the dialog showed of the
+    /// workspace's binding (`None` for a file no binding records); core
+    /// refuses if the workspace holds another database by now.
+    pub fn sqlite_snapshot(
+        &mut self,
+        target: ServiceTarget,
+        workspace: Workspace,
+        expect: Option<BranchExpect>,
+        name: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let service = target.key.clone();
+        let title = format!("Snapshot {} of {service}", crate::ops::shown(&name));
+        self.service_job(
+            &target,
+            title,
+            window,
+            cx,
+            move |project, backend, progress| {
+                progress.output(&format!(
+                    "Copying the {service} database of {} under SQLite's own locks…",
+                    workspace.name
+                ));
+                let made = backend.sqlite_snapshot(project, &workspace, &service, &name, expect)?;
+                let mut facts = Vec::new();
+                facts.extend(made.how.as_ref().map(|how| format!("taken by {how}")));
+                facts.extend(made.bytes.map(|bytes| {
+                    crate::model::format_bytes(i64::try_from(bytes).unwrap_or(i64::MAX))
+                }));
+                progress.output(&format!("Made {} ({}).", made.label, facts.join(", ")));
+                Ok(Done {
+                    summary: format!("Created snapshot {} of {service}", made.label),
+                    ..Done::default()
+                })
+            },
+        );
+    }
+
+    /// Delete snapshot `name`@v`version`; `label` is how it is drawn.
+    pub fn sqlite_delete_snapshot(
+        &mut self,
+        target: ServiceTarget,
+        name: String,
+        version: u32,
+        label: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let service = target.key.clone();
+        let title = format!("Delete snapshot {label} of {service}");
+        self.service_job(
+            &target,
+            title,
+            window,
+            cx,
+            move |project, backend, progress| {
+                progress.output(&format!("Removing {label}…"));
+                backend.sqlite_delete_snapshot(project, &service, &name, version)?;
+                Ok(Done {
+                    summary: format!("Deleted snapshot {label} of {service}"),
+                    ..Done::default()
+                })
+            },
+        );
+    }
+
+    /// Replace a workspace's SQLite database with a fresh copy of `to` (`source`
+    /// says which, in words; `None` is the source it was created from).
+    pub fn sqlite_reset(
+        &mut self,
+        target: ServiceTarget,
+        bound: BoundWorkspace,
+        to: Option<DataSource>,
+        source: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let service = target.key.clone();
+        let BoundWorkspace { workspace, expect } = bound;
+        let title = crate::ops::shown(&format!("Reset {service} of {}", workspace.name));
+        self.service_job(
+            &target,
+            title,
+            window,
+            cx,
+            move |project, backend, progress| {
+                progress.output(&format!(
+                    "Replacing the {service} database of {} with a fresh copy of {source}…",
+                    workspace.name
+                ));
+                let done = backend.sqlite_reset(project, &workspace, &service, to, expect)?;
+                let how = done
+                    .method
+                    .as_ref()
+                    .map_or("nothing cloned".to_string(), |m| format!("cloned by {m}"));
+                progress.output(&format!("Done: {how}. The file is at the same path."));
+                Ok(Done {
+                    summary: format!(
+                        "Reset {service} of {} from {} ({how})",
+                        workspace.name,
+                        crate::services::sqlite_source_text(&done.source)
+                    ),
+                    ..Done::default()
+                })
+            },
+        );
+    }
+
+    /// Remove a workspace's SQLite database file (and its binding, so that the
+    /// next setup makes a fresh one from the same source).
+    pub fn sqlite_drop(
+        &mut self,
+        target: ServiceTarget,
+        bound: BoundWorkspace,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let service = target.key.clone();
+        let BoundWorkspace { workspace, expect } = bound;
+        let title = crate::ops::shown(&format!("Drop {service} of {}", workspace.name));
+        self.service_job(
+            &target,
+            title,
+            window,
+            cx,
+            move |project, backend, progress| {
+                progress.output(&format!(
+                    "Removing the {service} database of {}…",
+                    workspace.name
+                ));
+                let removed = backend.sqlite_drop(project, &workspace, &service, expect)?;
+                Ok(Done {
+                    summary: if removed {
+                        format!(
+                            "Dropped the {service} database of {}. Setting the workspace up again makes a fresh one.",
+                            workspace.name
+                        )
+                    } else {
+                        format!(
+                            "{} had no {service} database file; its binding was removed",
+                            workspace.name
+                        )
+                    },
                     ..Done::default()
                 })
             },

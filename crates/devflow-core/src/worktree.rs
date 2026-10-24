@@ -1,5 +1,8 @@
 //! Git worktrees through libgit2: listing, creation, removal and branch
-//! deletion. devflow never shells out to `git` for these.
+//! deletion. devflow shells out to `git` for none of these, except for the
+//! checkout of a new worktree when the person chose that explicitly
+//! (`[worktree] checkout = "git"` in `devflow.local.toml`, see [`native`]).
+use crate::config::CheckoutBackend;
 use crate::error::Protected;
 use crate::project::Project;
 use crate::remedy::{Problem, Remedy};
@@ -15,6 +18,7 @@ mod evidence;
 mod faithful;
 #[cfg(test)]
 mod gitoracle;
+pub mod native;
 mod prune;
 mod rawconfig;
 pub use evidence::{Merge, MergeEvidence, merge_evidence};
@@ -366,8 +370,40 @@ pub struct CreateOptions<'a> {
 pub struct Created {
     pub workspace: Workspace,
     pub origin: BranchOrigin,
+    /// Who checked the files out.
+    pub checkout: Checkout,
     /// Things worth saying that did not stop the creation.
     pub warnings: Vec<String>,
+}
+
+/// Who checked a worktree's files out: devflow through libgit2, or Git itself
+/// (the person's explicit, machine-local choice, which authorizes Git's own
+/// filters and hooks; see [`CheckoutBackend`]).
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct Checkout {
+    pub backend: CheckoutBackend,
+    /// What `git --version` printed, for the native backend.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub git: Option<String>,
+}
+
+impl Checkout {
+    /// The libgit2 checkout.
+    pub fn libgit2() -> Checkout {
+        Checkout {
+            backend: CheckoutBackend::Libgit2,
+            git: None,
+        }
+    }
+
+    /// The words a person reads: `libgit2`, or `Git (git version 2.50.1)`.
+    pub fn describe(&self) -> String {
+        match (&self.backend, &self.git) {
+            (CheckoutBackend::Git, Some(version)) => format!("Git ({version})"),
+            (CheckoutBackend::Git, None) => "Git".to_string(),
+            (CheckoutBackend::Libgit2, _) => "libgit2".to_string(),
+        }
+    }
 }
 
 /// Where a workspace's branch started and what it tracks.
@@ -503,6 +539,12 @@ fn create_locked(project: &Project, name: &str, options: &CreateOptions) -> Resu
 
     // Everything that can refuse comes before the first effect.
     let mut warnings = Vec::new();
+    // The native backend is an explicit choice: a Git that is not there is an
+    // error to act on, never a reason to check out another way.
+    let git = match project.config.worktree.checkout {
+        CheckoutBackend::Libgit2 => None,
+        CheckoutBackend::Git => Some(native::Git::locate(project)?),
+    };
     let existing = match repo.find_branch(name, BranchType::Local) {
         Ok(branch) => Some(branch),
         Err(e) if e.code() == ErrorCode::NotFound => None,
@@ -528,11 +570,15 @@ fn create_locked(project: &Project, name: &str, options: &CreateOptions) -> Resu
             (start.commit, Some(start))
         }
     };
-    warnings.extend(faithful::check(
-        &repo,
-        &repo.find_commit(commit)?,
-        &project.root,
-    )?);
+    // What libgit2 cannot check out faithfully is refused before anything is
+    // created. Git checks out everything itself, so nothing is refused for it.
+    if git.is_none() {
+        warnings.extend(faithful::check(
+            &repo,
+            &repo.find_commit(commit)?,
+            &project.root,
+        )?);
+    }
 
     let tracks = match (&start, &existing) {
         (Some(start), _) => start
@@ -577,6 +623,13 @@ fn create_locked(project: &Project, name: &str, options: &CreateOptions) -> Resu
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("cannot create {}", parent.display()))?;
+        }
+        if let Some(git) = &git {
+            #[cfg(test)]
+            testhook::before_add();
+            return git.add_worktree(project, &path, name).map_err(|failure| {
+                native_failure(project, name, &path, &admin, created_branch, failure)
+            });
         }
         let branch = repo.find_branch(name, BranchType::Local)?.into_reference();
         let mut worktree_options = WorktreeAddOptions::new();
@@ -645,8 +698,81 @@ fn create_locked(project: &Project, name: &str, options: &CreateOptions) -> Resu
             start: start.map(|s| s.kind).unwrap_or(BranchStart::ExistingBranch),
             tracks: tracking_name,
         },
+        checkout: match &git {
+            Some(git) => Checkout {
+                backend: CheckoutBackend::Git,
+                git: Some(git.version.clone()),
+            },
+            None => Checkout::libgit2(),
+        },
         warnings,
     })
+}
+
+/// What a failed native checkout says: what Git reported and what it left,
+/// which is the caller's to inspect (Git cleans up a checkout that failed, but
+/// not one whose hook did, and an ended process leaves what it wrote). Nothing
+/// is retried with libgit2.
+fn native_failure(
+    project: &Project,
+    name: &str,
+    path: &Path,
+    admin: &Path,
+    created_branch: Option<git2::Oid>,
+    failure: native::Failure,
+) -> anyhow::Error {
+    let checkout_left = path.symlink_metadata().is_ok();
+    let registration_left = admin.exists();
+    let why = if failure.timed_out {
+        "Git did not finish in time and was ended".to_string()
+    } else {
+        format!("Git failed: {}", failure.message)
+    };
+    let local = project.root.join(crate::config::LOCAL_CONFIG_FILE);
+    if !checkout_left && !registration_left {
+        // Nothing of Git's is left; the caller removes the branch this run
+        // made, as it does after a checkout through libgit2.
+        return Problem::new(format!(
+            "cannot add worktree at {}: {why}. Git left nothing behind and devflow does not \
+             check out with libgit2 instead, since worktree.checkout asks for Git",
+            path.display()
+        ))
+        .with(Remedy::Retry)
+        .with(Remedy::OpenFile { path: local })
+        .into_error();
+    }
+    let mut left = Vec::new();
+    if checkout_left {
+        left.push(format!("the worktree at {}", path.display()));
+    }
+    if registration_left && !checkout_left {
+        left.push("its registration in the repository".to_string());
+    }
+    if created_branch.is_some() {
+        left.push(format!("the branch '{name}' this run created"));
+    }
+    let mut problem = Problem::new(format!(
+        "cannot add worktree at {}: {why}. Left behind: {}. Inspect it, then finish it or remove \
+         it; devflow does not check out with libgit2 instead, since worktree.checkout asks for \
+         Git",
+        path.display(),
+        left.join(" and ")
+    ));
+    // Registered and present: setting it up resumes by its identity.
+    let registered = list(project)
+        .map(|all| all.iter().any(|w| !w.missing && w.path == canonical(path)))
+        .unwrap_or(false);
+    if registered {
+        problem = problem.with(Remedy::Setup {
+            workspace: path.to_path_buf(),
+        });
+    }
+    if checkout_left {
+        problem = problem.with(Remedy::Reveal {
+            path: path.to_path_buf(),
+        });
+    }
+    problem.with(Remedy::OpenFile { path: local }).into_error()
 }
 
 /// A starting point that is not where the existing branch is.
@@ -2762,5 +2888,384 @@ mod tests {
                 (Err(_), Err(_)) => {}
             }
         }
+    }
+    // --- the native checkout ------------------------------------------------
+
+    fn git_runs() -> bool {
+        std::process::Command::new("git")
+            .arg("--version")
+            .output()
+            .map(|out| out.status.success())
+            .unwrap_or(false)
+    }
+
+    /// The project of `t` with `[worktree] checkout = "git"` in its local file.
+    fn native(t: &TestRepo) -> Project {
+        std::fs::write(
+            t.root.join("devflow.local.toml"),
+            "[worktree]\ncheckout = \"git\"\n",
+        )
+        .unwrap();
+        Project::open(&t.root).unwrap()
+    }
+
+    fn git_output(dir: &Path, args: &[&str]) -> String {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?}: {out:?}");
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    #[cfg(unix)]
+    fn hook(t: &TestRepo, name: &str, script: &str) {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = t.root.join(".git/hooks");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(name);
+        std::fs::write(&path, format!("#!/bin/sh\n{script}\n")).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    #[test]
+    fn the_native_checkout_takes_a_repository_libgit2_refuses() {
+        if !git_runs() {
+            eprintln!("skipped: no git on PATH");
+            return;
+        }
+        let t = repo(None);
+        std::fs::write(
+            t.root.join(".gitattributes"),
+            "*.psd filter=lfs diff=lfs merge=lfs -text\n",
+        )
+        .unwrap();
+        commit_all(&t.project.repo().unwrap(), "lfs");
+        // The default backend refuses before anything is created.
+        assert!(create(&t.project, "by-libgit2", None).is_err());
+        untouched_after_refusal(&t, "by-libgit2");
+
+        let project = native(&t);
+        let created = create_with(&project, "by-git", &CreateOptions::default()).unwrap();
+        assert_eq!(created.checkout.backend, CheckoutBackend::Git);
+        assert!(
+            created.checkout.describe().starts_with("Git (git version"),
+            "{:?}",
+            created.checkout
+        );
+        assert!(created.workspace.path.join("README.md").is_file());
+        assert!(created.workspace.path.join(".gitattributes").is_file());
+        assert_eq!(
+            git_output(
+                &created.workspace.path,
+                &["rev-parse", "--abbrev-ref", "HEAD"]
+            ),
+            "by-git"
+        );
+        // The same listing as for any worktree, with the branch devflow made.
+        let found = find(&project, "by-git").unwrap().unwrap();
+        assert_eq!(found.branch.as_deref(), Some("by-git"));
+        assert!(created.origin.created);
+        assert_eq!(created.origin.start, BranchStart::DefaultWorkspace);
+        // The libgit2 backend says so too.
+        let plain = create_with(
+            &t.project,
+            "plain",
+            &CreateOptions {
+                from: None,
+                base: Some("HEAD~1"),
+            },
+        )
+        .unwrap();
+        assert_eq!(plain.checkout, Checkout::libgit2());
+    }
+
+    #[test]
+    fn the_native_checkout_takes_a_real_partial_clone_and_git_fetches_what_it_lacks() {
+        if !git_runs() {
+            eprintln!("skipped: no git on PATH");
+            return;
+        }
+        // A server with two commits that changes README.md in the second.
+        let source = repo(None);
+        let server = source.project.repo().unwrap();
+        let first = server.head().unwrap().peel_to_commit().unwrap().id();
+        std::fs::write(source.root.join("README.md"), "changed\n").unwrap();
+        commit_all(&server, "second");
+        let mut config = server.config().unwrap();
+        config.set_bool("uploadpack.allowfilter", true).unwrap();
+        config
+            .set_bool("uploadpack.allowanysha1inwant", true)
+            .unwrap();
+
+        // `git clone --filter` leaves the blobs of the first commit out.
+        let clone = source.dir.path().join("clone");
+        let out = std::process::Command::new("git")
+            .args(["clone", "--quiet", "--filter=blob:none"])
+            .arg(format!("file://{}", source.root.display()))
+            .arg(&clone)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{out:?}");
+        let clone = clone.canonicalize().unwrap();
+        assert_eq!(
+            git_output(&clone, &["config", "remote.origin.promisor"]),
+            "true"
+        );
+        std::fs::write(clone.join("devflow.local.toml"), "").unwrap();
+        let project = Project::open(&clone).unwrap();
+
+        // The default backend refuses it, plainly.
+        let error = create(&project, "refused", None).unwrap_err();
+        let problem = error.downcast_ref::<Problem>().expect("typed");
+        assert!(problem.message.contains("partial clone"), "{problem:?}");
+        assert!(!path_for(&project, "refused").exists());
+
+        // Git makes the worktree and fetches the blob the clone lacks.
+        std::fs::write(
+            clone.join("devflow.local.toml"),
+            "[worktree]\ncheckout = \"git\"\n",
+        )
+        .unwrap();
+        let project = Project::open(&clone).unwrap();
+        let created = create_with(
+            &project,
+            "older",
+            &CreateOptions {
+                from: None,
+                base: Some(&first.to_string()),
+            },
+        )
+        .unwrap();
+        assert_eq!(created.checkout.backend, CheckoutBackend::Git);
+        assert_eq!(
+            std::fs::read_to_string(created.workspace.path.join("README.md")).unwrap(),
+            "shop\n"
+        );
+    }
+
+    #[test]
+    fn a_partial_clone_made_by_an_older_git_opens_and_is_judged() {
+        // Git before 2.4x names the extension; libgit2 calls such a
+        // repository "not a Git checkout" unless devflow lets it through.
+        if !git_runs() {
+            eprintln!("skipped: no git on PATH");
+            return;
+        }
+        let t = repo(None);
+        let git = t.project.repo().unwrap();
+        let mut config = git.config().unwrap();
+        config.set_i32("core.repositoryformatversion", 1).unwrap();
+        config.set_str("extensions.partialclone", "origin").unwrap();
+        config.set_bool("remote.origin.promisor", true).unwrap();
+        config
+            .set_str("remote.origin.url", "https://example.invalid/shop.git")
+            .unwrap();
+        let project = Project::open(&t.root).unwrap();
+        let error = create(&project, "refused", None).unwrap_err();
+        assert!(
+            error
+                .downcast_ref::<Problem>()
+                .is_some_and(|p| p.message.contains("partial clone")),
+            "{error:#}"
+        );
+        let project = native(&t);
+        // Everything is local here, so Git has nothing to fetch.
+        let created = create_with(&project, "accepted", &CreateOptions::default()).unwrap();
+        assert!(created.workspace.path.join("README.md").is_file());
+    }
+
+    #[test]
+    fn devflow_resolves_the_start_and_the_upstream_before_git_checks_out() {
+        if !git_runs() {
+            eprintln!("skipped: no git on PATH");
+            return;
+        }
+        let t = repo(None);
+        let git = t.project.repo().unwrap();
+        git.remote_with_fetch(
+            "origin",
+            "https://example.invalid/shop.git",
+            "+refs/heads/review/*:refs/remotes/origin/*",
+        )
+        .unwrap();
+        let first = git.head().unwrap().peel_to_commit().unwrap();
+        std::fs::write(t.root.join("second.txt"), "2\n").unwrap();
+        let second = commit_all(&git, "second");
+        git.reference("refs/remotes/origin/topic", first.id(), true, "fetch")
+            .unwrap();
+        let project = native(&t);
+
+        // The remote branch of that name, tracked as the fetch refspec says.
+        let created = create_with(&project, "topic", &CreateOptions::default()).unwrap();
+        assert_eq!(
+            created.origin.start,
+            BranchStart::RemoteBranch {
+                name: "origin/topic".into()
+            }
+        );
+        assert_eq!(created.origin.tracks.as_deref(), Some("origin/topic"));
+        assert_eq!(
+            upstream_of(&t, "topic"),
+            (
+                Some("origin".into()),
+                Some("refs/heads/review/topic".into())
+            )
+        );
+        assert_eq!(
+            git_output(&created.workspace.path, &["rev-parse", "HEAD"]),
+            first.id().to_string()
+        );
+        assert!(!created.workspace.path.join("second.txt").exists());
+
+        // `--base`: any commit-ish, resolved once, and the tag is not a branch.
+        git.tag_lightweight("v1", first.as_object(), false).unwrap();
+        let based = create_with(
+            &project,
+            "from-tag",
+            &CreateOptions {
+                from: None,
+                base: Some("v1"),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            git_output(&based.workspace.path, &["rev-parse", "HEAD"]),
+            first.id().to_string()
+        );
+        // The default start is the default workspace's HEAD.
+        let plain = create_with(&project, "plain", &CreateOptions::default()).unwrap();
+        assert_eq!(
+            git_output(&plain.workspace.path, &["rev-parse", "HEAD"]),
+            second.to_string()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn git_runs_its_hooks_with_devflows_own_hook_kept_out() {
+        if !git_runs() {
+            eprintln!("skipped: no git on PATH");
+            return;
+        }
+        let t = repo(None);
+        let out = t.dir.path().join("hook.out");
+        hook(
+            &t,
+            "post-checkout",
+            &format!(
+                "echo \"active=$DEVFLOW_SETUP_ACTIVE prompt=$GIT_TERMINAL_PROMPT\" >> '{}'",
+                out.display()
+            ),
+        );
+        let project = native(&t);
+        let created = create_with(&project, "hooked", &CreateOptions::default()).unwrap();
+        let seen = std::fs::read_to_string(&out).unwrap();
+        assert_eq!(seen.trim(), "active=1 prompt=0", "{seen}");
+        assert!(created.workspace.path.join("README.md").is_file());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_failing_hook_reports_what_survives_and_never_falls_back() {
+        if !git_runs() {
+            eprintln!("skipped: no git on PATH");
+            return;
+        }
+        let t = repo(None);
+        hook(&t, "post-checkout", "echo 'the hook says no' >&2; exit 1");
+        let project = native(&t);
+        let error = create_with(&project, "survivor", &CreateOptions::default()).unwrap_err();
+        let problem = error.downcast_ref::<Problem>().expect("typed");
+        let path = path_for(&project, "survivor");
+        assert!(problem.message.contains("the hook says no"), "{problem:?}");
+        assert!(
+            problem.message.contains(&path.display().to_string()),
+            "{problem:?}"
+        );
+        assert!(
+            problem.message.contains("the branch 'survivor'"),
+            "{problem:?}"
+        );
+        assert!(
+            !problem.message.contains("git worktree"),
+            "no command line: {}",
+            problem.message
+        );
+        // Resuming is by the checkout's identity: setting that path up.
+        assert!(problem.remedies.contains(&Remedy::Setup {
+            workspace: path.clone()
+        }));
+        assert!(
+            problem
+                .remedies
+                .contains(&Remedy::Reveal { path: path.clone() })
+        );
+        // What Git left is there, and libgit2 did not make another.
+        assert!(path.join("README.md").is_file());
+        let repo = project.repo().unwrap();
+        assert!(repo.find_branch("survivor", BranchType::Local).is_ok());
+        let found = find(&project, "survivor").unwrap().unwrap();
+        assert_eq!(found.branch.as_deref(), Some("survivor"));
+        // A second attempt finds the checkout instead of making a new one.
+        let again = create_with(&project, "survivor", &CreateOptions::default()).unwrap_err();
+        assert!(again.to_string().contains("already exists"), "{again:#}");
+    }
+
+    #[test]
+    fn a_checkout_git_undoes_leaves_nothing_and_the_branch_this_run_made_goes() {
+        if !git_runs() {
+            eprintln!("skipped: no git on PATH");
+            return;
+        }
+        let t = repo(None);
+        let git = t.project.repo().unwrap();
+        let mut config = git.config().unwrap();
+        config.set_str("filter.boom.smudge", "false").unwrap();
+        config.set_bool("filter.boom.required", true).unwrap();
+        std::fs::write(t.root.join(".gitattributes"), "*.dat filter=boom\n").unwrap();
+        std::fs::write(t.root.join("x.dat"), "data\n").unwrap();
+        commit_all(&git, "a file whose filter fails");
+        let project = native(&t);
+
+        let error = create_with(&project, "fails", &CreateOptions::default()).unwrap_err();
+        let problem = error.downcast_ref::<Problem>().expect("typed");
+        assert!(
+            problem.message.contains("left nothing behind"),
+            "{problem:?}"
+        );
+        assert!(problem.message.contains("does not check out with libgit2"));
+        assert!(problem.remedies.contains(&Remedy::Retry));
+        assert!(!path_for(&project, "fails").exists());
+        assert!(git.find_branch("fails", BranchType::Local).is_err());
+        assert_eq!(list(&project).unwrap().len(), 1);
+        assert!(!git.path().join("worktrees/fails").exists());
+
+        // A branch that existed before is not this run's to remove.
+        let head = git.head().unwrap().peel_to_commit().unwrap();
+        git.branch("kept", &head, false).unwrap();
+        let error = create_with(&project, "kept", &CreateOptions::default()).unwrap_err();
+        assert!(error.downcast_ref::<Problem>().is_some(), "{error:#}");
+        assert!(git.find_branch("kept", BranchType::Local).is_ok());
+        assert!(!path_for(&project, "kept").exists());
+    }
+
+    #[test]
+    fn a_missing_git_stops_the_creation_before_any_effect() {
+        // `Git::locate` is judged before the branch exists: with the key set
+        // and no usable git, the same typed problem arrives and nothing is
+        // created. (PATH itself is not changed in a test; `native::tests`
+        // covers the search.)
+        let t = repo(None);
+        let project = native(&t);
+        let git = native::Git::locate(&project);
+        if git.is_ok() {
+            return;
+        }
+        let error = create_with(&project, "nothing", &CreateOptions::default()).unwrap_err();
+        assert!(error.downcast_ref::<Problem>().is_some());
+        untouched_after_refusal(&t, "nothing");
     }
 }

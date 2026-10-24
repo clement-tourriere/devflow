@@ -69,7 +69,7 @@ pub enum TrustChoice {
 impl TrustChoice {
     /// The approval core receives: bound to the digest the user reviewed, so
     /// core runs nothing in a workspace whose own scope differs from it.
-    fn approval(&self) -> Option<trust::Approval> {
+    pub(crate) fn approval(&self) -> Option<trust::Approval> {
         match self {
             Self::Reviewed(scope) => Some(trust::Approval::of(scope)),
             Self::NotNeeded | Self::Skip => None,
@@ -78,10 +78,23 @@ impl TrustChoice {
 }
 
 /// Is the loaded project still the one whose hooks were reviewed, in the
-/// workspace at `target` that the review was of?
-pub fn reviewed_matches(project: &Project, target: &Path, trust: &TrustChoice) -> bool {
+/// workspace at `target` that the review was of? `choosing`: the review was made
+/// with the default workspace's recipes chosen for that workspace.
+pub fn reviewed_matches(
+    project: &Project,
+    target: &Path,
+    trust: &TrustChoice,
+    choosing: bool,
+) -> bool {
     match trust {
-        TrustChoice::Reviewed(scope) => trust::scope_at(project, target).digest == scope.digest,
+        TrustChoice::Reviewed(scope) => {
+            let judged = if choosing {
+                std::borrow::Cow::Owned(project.at_choosing(target, true))
+            } else {
+                std::borrow::Cow::Borrowed(project)
+            };
+            trust::scope_at(&judged, target).digest == scope.digest
+        }
         TrustChoice::NotNeeded | TrustChoice::Skip => true,
     }
 }
@@ -101,12 +114,28 @@ pub enum Approval {
 
 /// Approve exactly `scope`, the scope of the workspace at `target`, for
 /// `project` (blocking; run it off the UI thread).
-pub fn approve_reviewed(project: &Project, target: &Path, scope: &Scope) -> Approval {
-    match jobs::catch(|| trust::approve_scope_at(project, target, scope)) {
+/// `choosing`: the scope was reviewed with the default workspace's recipes
+/// chosen for the workspace at `target`.
+pub fn approve_reviewed(
+    project: &Project,
+    target: &Path,
+    scope: &Scope,
+    choosing: bool,
+) -> Approval {
+    let judged = if choosing {
+        project.at_choosing(target, true)
+    } else {
+        project.clone()
+    };
+    match jobs::catch(|| trust::approve_scope_at(&judged, target, scope)) {
         Ok(()) => Approval::Approved,
         Err(message) => match jobs::catch(|| project.reload()) {
             Ok(fresh) => {
-                let fresh_scope = trust::scope_at(&fresh, target);
+                let fresh_scope = if choosing {
+                    trust::scope_at(&fresh.at_choosing(target, true), target)
+                } else {
+                    trust::scope_at(&fresh, target)
+                };
                 if fresh_scope.digest == scope.digest {
                     Approval::Failed(message)
                 } else {
@@ -503,10 +532,24 @@ impl AppState {
 
     /// Refuse to run hooks the user reviewed if the project's hooks are no
     /// longer what they saw. Returns `true` when the operation may go on.
-    fn hooks_unchanged(
+    pub(crate) fn hooks_unchanged(
         &self,
         trust: &TrustChoice,
         target: &Path,
+        title: &str,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> bool {
+        self.hooks_unchanged_choosing(trust, target, false, title, window, cx)
+    }
+
+    /// [`AppState::hooks_unchanged`] for a review made with the default
+    /// workspace's recipes chosen (`choosing`) for the workspace at `target`.
+    fn hooks_unchanged_choosing(
+        &self,
+        trust: &TrustChoice,
+        target: &Path,
+        choosing: bool,
         title: &str,
         window: &mut Window,
         cx: &mut App,
@@ -515,7 +558,7 @@ impl AppState {
             .selection
             .current()
             .and_then(|m| m.project.as_ref())
-            .is_none_or(|project| reviewed_matches(project, target, trust));
+            .is_none_or(|project| reviewed_matches(project, target, trust, choosing));
         if !unchanged {
             Self::notify_error(
                 window,
@@ -614,6 +657,47 @@ impl AppState {
         );
     }
 
+    /// Use the default workspace's recipes (hooks, `[env]`, copy list) in a
+    /// workspace whose own `devflow.toml` is missing or unusable: core records
+    /// the choice in its receipt and sets it up again. What those recipes ask to
+    /// run is reviewed first when it is not approved (the default workspace's
+    /// usually are, and the same digest then covers this workspace): `trust` is
+    /// the answer to that review, which was of the scope the workspace has with
+    /// the choice made.
+    pub fn use_default_recipes(
+        &mut self,
+        workspace: Workspace,
+        trust: TrustChoice,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let title = shown(&format!(
+            "Use the default workspace's recipes in {}",
+            workspace.name
+        ));
+        if !self.hooks_unchanged_choosing(&trust, &workspace.path, true, &title, window, cx) {
+            return;
+        }
+        let pitchfork = self.pitchfork.resolve();
+        self.start_job(
+            title,
+            true,
+            FailureHint::None,
+            window,
+            cx,
+            move |project, progress| {
+                let options = SetupOptions {
+                    use_default_recipes: true,
+                    approval: trust.approval(),
+                    pitchfork,
+                    ..Default::default()
+                };
+                let outcome = setup::activate(&project, &workspace, options, progress)?;
+                Ok(done_from(format!("Set up {}", workspace.name), &outcome))
+            },
+        );
+    }
+
     pub fn remove_workspace(
         &mut self,
         target: WorkspaceRef,
@@ -665,6 +749,9 @@ impl AppState {
                     "Stopped {} pitchfork daemon(s) first.",
                     outcome.stopped_daemons.len()
                 ));
+            }
+            if let Some(released) = &outcome.released_focus {
+                warnings.push(released.describe());
             }
             Ok(Done {
                 summary: format!("Removed workspace {}", target.name),
@@ -1191,7 +1278,7 @@ fn fresh_server_of(project: &Project) -> Result<Server> {
         .context("PostgreSQL branching is not configured for this project")
 }
 
-fn done_from(summary: String, outcome: &SetupOutcome) -> Done {
+pub(crate) fn done_from(summary: String, outcome: &SetupOutcome) -> Done {
     let needs_attention = outcome.status == Status::NeedsAttention;
     let mut warnings = outcome.warnings.clone();
     // What was repaired and which branch the checkout holds now.
@@ -1513,17 +1600,24 @@ mod tests {
         assert!(reviewed_matches(
             &project,
             &root,
-            &TrustChoice::Reviewed(Box::new(reviewed.clone()))
+            &TrustChoice::Reviewed(Box::new(reviewed.clone())),
+            false
         ));
-        assert!(reviewed_matches(&project, &root, &TrustChoice::NotNeeded));
-        assert!(reviewed_matches(&project, &root, &TrustChoice::Skip));
+        assert!(reviewed_matches(
+            &project,
+            &root,
+            &TrustChoice::NotNeeded,
+            false
+        ));
+        assert!(reviewed_matches(&project, &root, &TrustChoice::Skip, false));
 
         let changed = tests_support::project_with_hooks(&["bun install", "rm -rf ~"]);
         assert!(
             !reviewed_matches(
                 &changed,
                 &root,
-                &TrustChoice::Reviewed(Box::new(reviewed.clone()))
+                &TrustChoice::Reviewed(Box::new(reviewed.clone())),
+                false
             ),
             "hooks nobody reviewed must not run"
         );
@@ -1540,7 +1634,8 @@ mod tests {
             !reviewed_matches(
                 &project,
                 other.path(),
-                &TrustChoice::Reviewed(Box::new(reviewed))
+                &TrustChoice::Reviewed(Box::new(reviewed)),
+                false
             ),
             "a review of one workspace does not stand for another"
         );
@@ -1653,11 +1748,10 @@ pub(crate) mod tests_support {
 
     /// A project in memory whose only distinguishing feature is its setup hooks.
     pub fn project_with_hooks(setup: &[&str]) -> Project {
-        Project {
-            root: PathBuf::from("/tmp/shop"),
-            git_common_dir: PathBuf::from("/tmp/shop/.git"),
-            config_path: PathBuf::from("/tmp/shop/devflow.toml"),
-            config: Config {
+        Project::new(
+            PathBuf::from("/tmp/shop"),
+            PathBuf::from("/tmp/shop/.git"),
+            Config {
                 project: ProjectSection {
                     name: "shop".into(),
                     id: uuid::Uuid::nil(),
@@ -1668,6 +1762,7 @@ pub(crate) mod tests_support {
                 },
                 ..Config::default()
             },
-        }
+            PathBuf::from("/tmp/shop/devflow.toml"),
+        )
     }
 }

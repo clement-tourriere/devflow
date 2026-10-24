@@ -861,21 +861,34 @@ fn a_failed_phase_is_a_banner_with_a_retry_and_a_skip_points_to_the_setup_tab(
     cx: &mut TestAppContext,
 ) {
     let h = open(cx, install_loaded);
+    // The workspace's recipes are its own branch's: give the checkout a real
+    // `devflow.toml` with hooks nobody approved, so core offers the review.
+    let checkout = tempfile::tempdir().unwrap();
+    let id = cx.read_entity(&h.state, |s, _| s.selection.current().unwrap().key.project);
+    std::fs::write(
+        checkout.path().join("devflow.toml"),
+        format!(
+            "[project]\nname = \"shop\"\nid = \"{id}\"\n\n[hooks]\nsetup = [\"mise install\"]\n"
+        ),
+    )
+    .unwrap();
+    let path = checkout.path().canonicalize().unwrap();
     update(cx, &h, |s, cx| {
         let model = s.selection.current_mut().unwrap();
-        let receipt = model
+        let workspace = model
             .workspaces
             .iter_mut()
             .find(|w| w.workspace.name == "feature-x")
-            .and_then(|w| w.receipt.as_mut())
             .unwrap();
+        workspace.workspace.path = path.clone();
+        let receipt = workspace.receipt.as_mut().unwrap();
         receipt.set_phase(
             Phase::Services,
             PhaseState::Failed,
             Some("the server is down".into()),
         );
         receipt.skip_required(Phase::Hooks, "the hooks are not approved".into());
-        model.selected_workspace = Some(ws_path("feature-x"));
+        model.selected_workspace = Some(path.clone());
         cx.notify();
     });
     frame(cx, &h, |window| {
@@ -893,6 +906,213 @@ fn a_failed_phase_is_a_banner_with_a_retry_and_a_skip_points_to_the_setup_tab(
         Tab::Setup,
         "the skip leads to where approval lives"
     );
+}
+
+#[gpui_kit::test]
+fn a_workspace_without_recipes_has_one_banner_whose_button_makes_the_choice_through_core(
+    cx: &mut TestAppContext,
+) {
+    use devflow_core::{
+        project::Project,
+        receipt::{Receipt, Status},
+        setup::{self, CreateRequest, NoProgress, SetupOptions},
+    };
+    let scratch = scratch_project();
+    // A branch that starts before devflow.toml existed has no recipes of its own.
+    let project = Project::open(&scratch.entry.root).unwrap();
+    let made = setup::create(
+        &project,
+        CreateRequest {
+            name: "old".into(),
+            from: None,
+            base: Some("HEAD~1".into()),
+            options: SetupOptions::default(),
+        },
+        &mut NoProgress,
+    )
+    .unwrap();
+    assert_eq!(
+        made.status,
+        Status::NeedsAttention,
+        "{:?}",
+        made.receipt.phases
+    );
+    let (path, git_dir) = (made.workspace.path.clone(), made.workspace.git_dir.clone());
+
+    let h = open_scratch(cx, &scratch);
+    update(cx, &h, |s, cx| s.select_workspace(path.clone(), cx));
+    frame(cx, &h, |window| {
+        assert!(window.find("problem-recipes").visible(), "the one banner");
+        assert!(
+            window.find("problem-use-default-recipes").visible(),
+            "the choice is a button"
+        );
+        assert!(
+            window.try_find("problem-hooks").is_none() && window.try_find("problem-env").is_none(),
+            "not one banner per phase that waits for it"
+        );
+        // (Below the fold of the pane: present, not necessarily in view.)
+        assert!(window.try_find("recipes-source").is_some());
+    });
+    // The button calls core: the choice is recorded and the workspace is set up
+    // again with the default workspace's recipes.
+    click(cx, &h, "problem-use-default-recipes");
+    wait(cx, "the choice to be carried out", |cx| {
+        cx.read_entity(&h.state, |s, _| {
+            s.busy().is_none() && s.activity.as_ref().is_some_and(|a| a.outcome.is_some())
+        })
+    });
+    let receipt = Receipt::load(&git_dir).unwrap().unwrap();
+    assert!(receipt.default_recipes.is_some(), "{receipt:?}");
+    assert_eq!(receipt.status(), Status::Ready, "{:?}", receipt.phases);
+    update(cx, &h, |s, cx| s.refresh(cx));
+    wait(cx, "the list to be read again", |cx| {
+        cx.read_entity(&h.state, |s, _| {
+            s.selection.current().is_some_and(|m| {
+                !m.refreshing
+                    && m.workspace_at(&path)
+                        .is_some_and(|w| w.status == Some(Status::Ready))
+            })
+        })
+    });
+    frame(cx, &h, |window| {
+        assert!(
+            window.try_find("problem-recipes").is_none(),
+            "nothing to choose now"
+        );
+        // (Below the fold of the pane: present, not necessarily in view.)
+        assert!(window.try_find("recipes-source").is_some());
+    });
+}
+
+#[gpui_kit::test]
+fn a_file_nobody_committed_is_a_second_button_beside_the_choice(cx: &mut TestAppContext) {
+    use devflow_core::{
+        project::Project,
+        receipt::Status,
+        setup::{self, CreateRequest, NoProgress, SetupOptions},
+    };
+    let scratch = scratch_project();
+    let root = scratch.entry.root.clone();
+    // The main checkout's devflow.toml is on disk and in no commit.
+    for args in [
+        &["rm", "-q", "--cached", "devflow.toml"][..],
+        &["commit", "-q", "-m", "untrack"][..],
+    ] {
+        let status = std::process::Command::new("git")
+            .args(["-c", "user.name=t", "-c", "user.email=t@example.com"])
+            .args(args)
+            .current_dir(&root)
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?}");
+    }
+    let project = Project::open(&root).unwrap();
+    let made = setup::create(
+        &project,
+        CreateRequest {
+            name: "early".into(),
+            from: None,
+            base: None,
+            options: SetupOptions::default(),
+        },
+        &mut NoProgress,
+    )
+    .unwrap();
+    assert_eq!(made.status, Status::NeedsAttention);
+    let path = made.workspace.path.clone();
+
+    let h = open_scratch(cx, &scratch);
+    update(cx, &h, |s, cx| s.select_workspace(path.clone(), cx));
+    frame(cx, &h, |window| {
+        assert!(window.find("problem-recipes").visible());
+        assert!(window.find("problem-use-default-recipes").visible());
+        assert!(
+            window.find("problem-open-recipes-file").visible(),
+            "then the file to commit"
+        );
+    });
+}
+
+#[gpui_kit::test]
+fn choosing_the_default_recipes_goes_straight_to_the_review_when_they_are_not_approved(
+    cx: &mut TestAppContext,
+) {
+    use super::ui_tests::commit_config;
+    use devflow_core::{
+        project::Project,
+        receipt::{Receipt, Status},
+        setup::{self, CreateRequest, NoProgress, SetupOptions},
+    };
+    let scratch = scratch_project();
+    let root = scratch.entry.root.clone();
+    // The default workspace's setup hook, committed and not approved by anyone.
+    let file = root.join("devflow.toml");
+    let text = std::fs::read_to_string(&file).unwrap();
+    let base = text.split("[hooks]").next().unwrap();
+    std::fs::write(
+        &file,
+        format!("{base}[hooks]\nsetup = [\"touch ran-default.txt\"]\n"),
+    )
+    .unwrap();
+    commit_config(&root);
+    // A branch that starts before devflow.toml existed has no recipes of its own.
+    let project = Project::open(&root).unwrap();
+    let made = setup::create(
+        &project,
+        CreateRequest {
+            name: "old".into(),
+            from: None,
+            base: Some("HEAD~2".into()),
+            options: SetupOptions::default(),
+        },
+        &mut NoProgress,
+    )
+    .unwrap();
+    assert_eq!(
+        made.status,
+        Status::NeedsAttention,
+        "{:?}",
+        made.receipt.phases
+    );
+    let (path, git_dir) = (made.workspace.path.clone(), made.workspace.git_dir.clone());
+
+    let h = open_scratch(cx, &scratch);
+    update(cx, &h, |s, cx| s.select_workspace(path.clone(), cx));
+    frame(cx, &h, |_| {});
+    click(cx, &h, "problem-use-default-recipes");
+    // The choice does not run at once: what the default recipes ask to run is
+    // reviewed first, as the scope this workspace would then have.
+    wait(cx, "the review of the default recipes", |cx| {
+        exists(cx, &h, "trust-choosing")
+    });
+    assert!(
+        Receipt::load(&git_dir)
+            .unwrap()
+            .unwrap()
+            .default_recipes
+            .is_none(),
+        "nothing was chosen yet"
+    );
+    assert!(!path.join("ran-default.txt").exists());
+    // The person confirms there: approve and run.
+    click(cx, &h, "trust");
+    wait(cx, "the choice to be carried out", |cx| {
+        cx.read_entity(&h.state, |s, _| {
+            s.busy().is_none() && s.activity.as_ref().is_some_and(|a| a.outcome.is_some())
+        })
+    });
+    let receipt = Receipt::load(&git_dir).unwrap().unwrap();
+    assert!(receipt.default_recipes.is_some(), "{receipt:?}");
+    assert_eq!(receipt.status(), Status::Ready, "{:?}", receipt.phases);
+    assert!(
+        path.join("ran-default.txt").is_file(),
+        "the approved hook ran"
+    );
+    assert!(matches!(
+        trust::state_at(&Project::open(&root).unwrap(), &path).unwrap(),
+        TrustState::Trusted
+    ));
 }
 
 #[gpui_kit::test]

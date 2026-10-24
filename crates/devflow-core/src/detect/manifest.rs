@@ -5,7 +5,7 @@
 //! (`package.json`, `pyproject.toml`, `Cargo.toml`, `composer.json`) or
 //! scanned for dependency names (`Gemfile.lock`, `mix.exs`, `go.mod`,
 //! `requirements*.txt`, Gradle and Maven files).
-use super::facts::{PackageManager, PackageManagerFact, WorkspaceSource};
+use super::facts::{PackageManager, PackageManagerFact};
 use super::repo::{DirIndex, Repo, join};
 use super::{globs, js};
 use serde_json::Value;
@@ -104,7 +104,6 @@ impl Deps {
 #[derive(Debug)]
 pub(crate) struct JsManifest {
     pub file: String,
-    pub name: Option<String>,
     pub scripts: BTreeMap<String, String>,
     /// Raw `packageManager` value (`pnpm@9.1.0+sha512...`).
     pub package_manager: Option<String>,
@@ -165,6 +164,15 @@ impl Project {
     pub(crate) fn has_dir(&self, name: &str) -> bool {
         self.dir.has_dir(name)
     }
+}
+
+/// Where workspace globs were declared.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WorkspaceSource {
+    /// `workspaces` in `package.json` (npm, yarn, bun).
+    PackageJson,
+    /// `pnpm-workspace.yaml`.
+    PnpmWorkspaceYaml,
 }
 
 /// The workspace globs the root's package manager reads.
@@ -436,10 +444,6 @@ fn parse_package_json(repo: &Repo, dir: &str) -> Option<(JsManifest, Deps)> {
         });
     let manifest = JsManifest {
         file,
-        name: object
-            .get("name")
-            .and_then(Value::as_str)
-            .map(str::to_string),
         scripts,
         package_manager: object
             .get("packageManager")

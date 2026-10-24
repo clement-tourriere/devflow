@@ -108,10 +108,10 @@ run = "bunx prisma migrate deploy"
     // Package manager: the field wins, with its version.
     let js = facts.js_project().expect("root js project");
     assert_eq!(js.package_manager.kind, PackageManager::Bun);
-    assert_eq!(js.package_manager.version.as_deref(), Some("1.1.30"));
+    assert!(!js.package_manager.assumed);
     assert_eq!(
-        js.package_manager.source,
-        PackageManagerSource::PackageManagerField
+        js.package_manager.evidence,
+        vec!["package.json:packageManager"]
     );
     assert_eq!(
         facts.js_install_command(),
@@ -140,18 +140,8 @@ run = "bunx prisma migrate deploy"
             .config_files
             .contains(&"prisma/schema.prisma".to_string())
     );
-    assert!(
-        facts
-            .drivers
-            .iter()
-            .any(|d| d.engine == Engine::Postgres && d.dependency == "pg")
-    );
-    assert!(
-        facts
-            .drivers
-            .iter()
-            .any(|d| d.engine == Engine::Redis && d.dependency == "ioredis")
-    );
+    assert!(facts.drivers.iter().any(|d| d.engine == Engine::Postgres));
+    assert!(facts.drivers.iter().any(|d| d.engine == Engine::Redis));
 
     // Compose.
     let db = service(&facts, "db");
@@ -178,7 +168,6 @@ run = "bunx prisma migrate deploy"
     assert_eq!(facts.compose_services(Engine::Postgres).len(), 1);
 
     // .env: names only.
-    assert!(facts.env.has_database_keys);
     let database_url = facts
         .env
         .keys
@@ -196,7 +185,7 @@ run = "bunx prisma migrate deploy"
 
     // Processes.
     let dev = process(&facts, "dev", ProcessSource::PackageJson).expect("dev script");
-    assert_eq!(dev.display.as_deref(), Some("bun run dev"));
+    assert_eq!(shown(dev).as_deref(), Some("bun run dev"));
     assert_eq!(dev.role, ProcessRole::Dev);
     let start = process(&facts, "start", ProcessSource::PackageJson).expect("start script");
     assert_eq!(start.role, ProcessRole::Serve);
@@ -233,17 +222,12 @@ run = "bunx prisma migrate deploy"
     assert_eq!(facts.wiring.devflow_config.as_deref(), Some("devflow.toml"));
     let pitchfork = facts.wiring.pitchfork.as_ref().expect("pitchfork");
     assert_eq!(pitchfork.daemons.len(), 2);
-    assert!(pitchfork.all_daemons_use_mise);
     assert!(facts.wiring.mise_loads_devflow_env);
     let mise = facts.toolchain.mise.as_ref().expect("mise");
     assert_eq!(mise.tasks, vec!["db:migrate", "dev"]);
     assert_eq!(mise.tools, vec!["bun", "node"]);
     assert!(facts.has_mise_task("dev"));
-    assert_eq!(facts.toolchain.version_files[0].file, ".nvmrc");
-    assert_eq!(
-        facts.toolchain.version_files[0].version.as_deref(),
-        Some("22")
-    );
+    assert_eq!(facts.toolchain.version_files[0], ".nvmrc");
 
     // Nothing sensitive leaks into the serialized facts.
     let json = serde_json::to_string(&facts).expect("serialize");
@@ -313,17 +297,12 @@ dev = ["pytest"]
         !facts.has_migration_tool(MigrationTool::Alembic),
         "no alembic.ini and no alembic dependency"
     );
-    assert!(
-        facts
-            .drivers
-            .iter()
-            .any(|d| d.engine == Engine::Postgres && d.dependency == "psycopg")
-    );
+    assert!(facts.drivers.iter().any(|d| d.engine == Engine::Postgres));
 
     let runserver =
         process(&facts, "runserver", ProcessSource::DjangoRunserver).expect("runserver");
     assert_eq!(
-        runserver.display.as_deref(),
+        shown(runserver).as_deref(),
         Some("uv run python manage.py runserver")
     );
 
@@ -337,7 +316,7 @@ dev = ["pytest"]
     let venv = artifact(&facts, ".venv").expect(".venv");
     assert_eq!(venv.recommendation, CopyRecommendation::NotRecommended);
     assert!(venv.reason.contains("not relocatable"));
-    assert_eq!(facts.toolchain.version_files[0].tool, "python");
+    assert_eq!(facts.toolchain.version_files[0], ".python-version");
 }
 
 #[test]
@@ -393,23 +372,17 @@ fn rails_with_mysql_compose_and_procfile_dev() {
             .config_files
             .contains(&"db/schema.rb".to_string())
     );
-    assert!(
-        facts
-            .drivers
-            .iter()
-            .any(|d| d.engine == Engine::Mysql && d.dependency == "mysql2")
-    );
+    assert!(facts.drivers.iter().any(|d| d.engine == Engine::Mysql));
 
     let mysql = service(&facts, "mysql");
     assert_eq!(mysql.engine, Engine::Mysql);
     assert_eq!(mysql.major_version, Some(8));
-    assert_eq!(mysql.ports[0].host_ip.as_deref(), Some("127.0.0.1"));
     assert_eq!(service(&facts, "redis").major_version, Some(7));
     assert_eq!(facts.compose.as_ref().expect("compose").file, "compose.yml");
 
     // Procfile.dev entries and bin/dev.
     let web = process(&facts, "web", ProcessSource::Procfile).expect("web");
-    assert_eq!(web.display.as_deref(), Some("Procfile.dev: web"));
+    assert_eq!(shown(web).as_deref(), Some("Procfile.dev: web"));
     assert_eq!(web.role, ProcessRole::Serve);
     assert_eq!(
         process(&facts, "css", ProcessSource::Procfile).map(|p| p.role),
@@ -420,7 +393,7 @@ fn rails_with_mysql_compose_and_procfile_dev() {
         Some(ProcessRole::Worker)
     );
     let bin_dev = process(&facts, "dev", ProcessSource::RailsBinDev).expect("bin/dev");
-    assert_eq!(bin_dev.display.as_deref(), Some("bin/dev"));
+    assert_eq!(shown(bin_dev).as_deref(), Some("bin/dev"));
 
     // Candidates: keys and builds are recommended; tmp and log are present but not advised.
     for path in [
@@ -438,7 +411,7 @@ fn rails_with_mysql_compose_and_procfile_dev() {
         assert_eq!(a.recommendation, CopyRecommendation::NotRecommended);
         assert!(!a.is_copy_candidate());
     }
-    assert_eq!(facts.toolchain.version_files[0].tool, "ruby");
+    assert_eq!(facts.toolchain.version_files[0], ".ruby-version");
 }
 
 #[test]
@@ -490,28 +463,23 @@ fn laravel() {
     );
     let migrations = migration(&facts, MigrationTool::Laravel).expect("laravel migrations");
     assert_eq!(migrations.migrations_dirs, vec!["database/migrations"]);
-    assert!(
-        facts
-            .drivers
-            .iter()
-            .any(|d| d.engine == Engine::Postgres && d.dependency == "ext-pdo_pgsql")
-    );
+    assert!(facts.drivers.iter().any(|d| d.engine == Engine::Postgres));
     let dev = process(&facts, "dev", ProcessSource::Composer).expect("composer dev");
-    assert_eq!(dev.display.as_deref(), Some("composer run dev"));
+    assert_eq!(shown(dev).as_deref(), Some("composer run dev"));
 
     // JavaScript side: npm (assumed from the lockfile) plus Vite.
     assert_eq!(
         facts.js_install_command(),
         Some("npm install --prefer-offline --no-audit --no-fund")
     );
+    assert!(!facts.js[0].package_manager.assumed);
     assert_eq!(
-        facts.js[0].package_manager.source,
-        PackageManagerSource::Lockfile
+        facts.js[0].package_manager.evidence,
+        vec!["package-lock.json"]
     );
     let vite = framework(&facts, Framework::Vite).expect("vite");
     assert!(vite.vite_based);
 
-    assert!(facts.env.has_database_keys);
     assert!(facts.env.has_key("DB_CONNECTION"));
     assert!(facts.env.has_key("REDIS_HOST"));
     assert!(!facts.env.has_key("APP_KEY"));
@@ -581,29 +549,17 @@ fn pnpm_monorepo_with_turbo() {
     // negated glob, so it is not a member: it shows up as a project of its own.
     assert_eq!(facts.js.len(), 2);
     assert_eq!(facts.js[1].path, "packages/legacy");
-    assert_eq!(
-        facts.js[1].package_manager.source,
-        PackageManagerSource::Inherited
-    );
+    assert!(!facts.js[1].package_manager.assumed);
     let js = &facts.js[0];
     assert_eq!(js.package_manager.kind, PackageManager::Pnpm);
-    assert_eq!(js.package_manager.version.as_deref(), Some("9.12.0"));
     assert_eq!(
         facts.js_install_command(),
         Some("pnpm install --frozen-lockfile --prefer-offline")
     );
-    let workspaces = js.workspaces.as_ref().expect("workspaces");
-    assert_eq!(workspaces.source, WorkspaceSource::PnpmWorkspaceYaml);
-    assert_eq!(
-        workspaces.patterns,
-        vec!["apps/*", "packages/*", "!packages/legacy"]
-    );
-    assert_eq!(js.monorepo_tools.len(), 1);
-    assert_eq!(js.monorepo_tools[0].tool, MonorepoTool::Turbo);
+    assert!(js.workspaces);
     assert!(
-        js.monorepo_tools[0]
-            .evidence
-            .contains(&"turbo.json".to_string())
+        js.evidence
+            .contains(&"pnpm-workspace.yaml:packages".to_string())
     );
 
     let paths: Vec<&str> = js.packages.iter().map(|p| p.path.as_str()).collect();
@@ -616,10 +572,8 @@ fn pnpm_monorepo_with_turbo() {
     let nest = framework(&facts, Framework::NestJs).expect("nest");
     assert_eq!(nest.path, "apps/api");
     assert!(
-        facts
-            .drivers
-            .iter()
-            .any(|d| d.path == "apps/api" && d.engine == Engine::Postgres)
+        facts.drivers.iter().any(|d| d.engine == Engine::Postgres
+            && d.evidence.iter().any(|e| e.starts_with("apps/api/")))
     );
 
     let web_dev = facts
@@ -627,7 +581,7 @@ fn pnpm_monorepo_with_turbo() {
         .iter()
         .find(|p| p.cwd == "apps/web" && p.name == "dev")
         .expect("apps/web dev");
-    assert_eq!(web_dev.display.as_deref(), Some("pnpm run dev"));
+    assert_eq!(shown(web_dev).as_deref(), Some("pnpm run dev"));
     let api_dev = process(&facts, "start:dev", ProcessSource::PackageJson).expect("nest dev");
     assert_eq!(api_dev.cwd, "apps/api");
     assert_eq!(api_dev.role, ProcessRole::Dev);
@@ -656,7 +610,6 @@ fn nothing_recognizable() {
     assert!(facts.drivers.is_empty());
     assert!(facts.compose.is_none());
     assert!(facts.env.files.is_empty());
-    assert!(!facts.env.has_database_keys);
     assert!(facts.processes.is_empty());
     assert!(facts.artifacts.is_empty());
     assert_eq!(facts.toolchain, ToolchainFacts::default());
@@ -749,7 +702,7 @@ fn polyglot_repository_with_nested_projects() {
     let sqlx = migration(&facts, MigrationTool::Sqlx).expect("sqlx");
     assert_eq!(sqlx.path, "worker");
     assert_eq!(sqlx.migrations_dirs, vec!["worker/migrations"]);
-    assert_eq!(sqlx.offline_data.as_deref(), Some("worker/.sqlx"));
+    assert!(sqlx.evidence.contains(&"worker/.sqlx".to_string()));
     assert_eq!(sqlx.database, Some(Engine::Postgres));
     assert!(framework(&facts, Framework::Rust).is_some_and(|f| f.path == "worker"));
 }

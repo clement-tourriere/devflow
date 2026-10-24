@@ -8,7 +8,7 @@
 //! by then) and for its end, and reads the outcome from the catalog.
 use super::catalog::{
     BranchRecord, Coordinator as CoordinatorRef, MysqlIdentity, Op, OpKind, RecordState, ResetPlan,
-    SnapshotRecord, SourceRef, Step,
+    SnapshotRecord, SourceExpect, SourceRef, Step,
 };
 use super::{Service, coordinator_program, docker, profile};
 use crate::config::Engine;
@@ -220,18 +220,38 @@ impl Service {
 
     /// Snapshot a branch as the next version of `name`.
     pub fn snapshot_branch(&self, branch: Uuid, name: &str) -> Result<SnapshotRecord> {
-        self.snapshot_branch_if(branch, name, |_| Ok(()))
+        self.snapshot_branch_expecting(branch, name, None)
     }
 
-    /// [`Service::snapshot_branch`] for a caller that must decide on the branch
-    /// as it is: `check` sees the record in the same locked update that
-    /// records the snapshot, and an error from it records nothing.
-    pub fn snapshot_branch_if(
+    /// [`Service::snapshot_branch`] for a caller that saw the branch as
+    /// `expect` says (its owner, generation and volume): the snapshot is planned
+    /// only if it is that now, and the expectation is journaled with the
+    /// operation so that the coordinator checks it again under the locks of
+    /// everything the operation touches, before it captures anything. A reset
+    /// planned at the same moment runs first and replaces the data; the
+    /// snapshot then fails, having captured and stopped nothing.
+    pub fn snapshot_branch_expecting(
         &self,
         branch: Uuid,
         name: &str,
-        check: impl FnOnce(&BranchRecord) -> Result<()>,
+        expect: Option<&SourceExpect>,
     ) -> Result<SnapshotRecord> {
+        let op_id = self.plan_snapshot(branch, name, expect)?;
+        self.run_op(op_id)?;
+        let id = self.require_op(op_id)?.target;
+        self.snapshot(id)?
+            .filter(|s| s.state == RecordState::Ready)
+            .with_context(|| format!("snapshot {name} did not become ready"))
+    }
+
+    /// Journal the snapshot of `branch` as the next version of `name` and
+    /// return the operation, without running it.
+    pub(super) fn plan_snapshot(
+        &self,
+        branch: Uuid,
+        name: &str,
+        expect: Option<&SourceExpect>,
+    ) -> Result<Uuid> {
         crate::db::validate_snapshot_name(name)?;
         self.recover_touching(&[branch])?;
         let id = Uuid::new_v4();
@@ -241,6 +261,7 @@ impl Service {
         op.copy_timeout_secs = Self::copy_timeout_secs();
         op.stop_timeout_secs = Self::stop_timeout_secs();
         op.helper_name = Some(self.helper_name(op.id));
+        op.expect = expect.cloned();
         let op_id = op.id;
         // The source is read, and the version taken, in the same locked
         // update that records the snapshot: two snapshots of one name cannot
@@ -255,7 +276,9 @@ impl Service {
                 "branch {branch} is not ready ({:?})",
                 source.state
             );
-            check(source)?;
+            if let Some(expect) = expect {
+                expect.verify(source)?;
+            }
             let (image, pin) = (source.image.clone(), source.pin.clone());
             let mysql = source.mysql.clone();
             let version = service.allocate_version(name);
@@ -280,10 +303,7 @@ impl Service {
             service.journal.push(op);
             Ok(())
         })?;
-        self.run_op(op_id)?;
-        self.snapshot(id)?
-            .filter(|s| s.state == RecordState::Ready)
-            .with_context(|| format!("snapshot {name} did not become ready"))
+        Ok(op_id)
     }
 
     /// Replace a branch's data with a fresh clone of `to`, through a staged

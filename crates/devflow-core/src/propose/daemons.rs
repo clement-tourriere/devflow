@@ -178,7 +178,7 @@ impl Builder<'_> {
             .any(|p| p.source == ProcessSource::RailsBinDev);
         let workspace_dev = facts.js.iter().any(|project| {
             project.path == "."
-                && project.workspaces.is_some()
+                && project.workspaces
                 && project
                     .packages
                     .iter()
@@ -373,7 +373,7 @@ impl Builder<'_> {
         let line = launch_line?;
         let script = process.name.as_str();
         let in_workspace_member = facts.js.iter().any(|project| {
-            project.workspaces.is_some()
+            project.workspaces
                 && project
                     .packages
                     .iter()

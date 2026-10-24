@@ -616,6 +616,11 @@ pub struct Op {
     /// Reset: the replacement and what it replaces.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reset: Option<ResetPlan>,
+    /// What the caller expects of the source branch when it is copied
+    /// ([`SourceExpect`]): checked by the coordinator under the locks, before
+    /// the capture.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expect: Option<SourceExpect>,
     /// Size in bytes of the dump the copy produced, recorded when the copy
     /// completed: what a completion after a crash must find in the volume.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -628,6 +633,50 @@ pub struct Op {
     pub error: Option<String>,
     pub started_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+/// What the caller of an operation saw of its source branch and expects it still
+/// to be when the operation copies it. Journaled with the operation, and checked
+/// again by the coordinator once it holds the locks of everything the operation
+/// touches, before anything is captured: a reset keeps a branch's id and owner
+/// and replaces its volume and bumps its generation, and one that was planned
+/// at the same moment (both pass recovery before either is journaled) runs
+/// first, so checking when the operation is planned says nothing about the
+/// data that is copied.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourceExpect {
+    /// The instance that owns the branch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<Uuid>,
+    /// The branch's generation (bumped by every reset).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generation: Option<u32>,
+    /// The volume holding the branch's data.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub volume: Option<String>,
+}
+
+impl SourceExpect {
+    /// `Ok` only when `branch` is what was expected.
+    pub fn verify(&self, branch: &BranchRecord) -> Result<()> {
+        if let Some(owner) = self.owner {
+            ensure!(
+                branch.owner == Some(owner),
+                "branch {} was not created by this workspace's instance",
+                branch.id
+            );
+        }
+        ensure!(
+            self.generation.is_none_or(|g| g == branch.generation)
+                && self.volume.as_ref().is_none_or(|v| *v == branch.volume),
+            "branch {} was reset since it was looked at (volume {}, generation {} now), so it \
+             is left alone",
+            branch.id,
+            branch.volume,
+            branch.generation
+        );
+        Ok(())
+    }
 }
 
 /// A `docker stop` an operation asked for, journaled before it is issued.
@@ -743,6 +792,7 @@ impl Op {
             stop: None,
             coordinator: None,
             reset: None,
+            expect: None,
             copied_size: None,
             rollback_from: None,
             error: None,

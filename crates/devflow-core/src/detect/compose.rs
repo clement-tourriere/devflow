@@ -34,20 +34,12 @@ const MAX_SERVICES: usize = 100;
 
 pub(super) fn detect(repo: &Repo) -> Option<ComposeFacts> {
     let root = repo.list(".");
-    let files: Vec<String> = FILES
-        .iter()
-        .filter(|f| root.has_file(f))
-        .map(|f| (*f).to_string())
-        .collect();
-    let file = files.first()?.clone();
+    let file = FILES.iter().find(|f| root.has_file(f))?.to_string();
     let mut facts = ComposeFacts {
         file: file.clone(),
-        files,
-        project_name: None,
         services: Vec::new(),
         volumes: Vec::new(),
         volumes_complete: true,
-        evidence: vec![file.clone()],
     };
     let text = repo.read_text(&file)?;
     let document = yaml::parse(repo, &file, &text)?;
@@ -78,11 +70,6 @@ pub(super) fn detect(repo: &Repo) -> Option<ComposeFacts> {
     let (volumes, complete) = volumes(document.get("volumes"));
     facts.volumes = volumes;
     facts.volumes_complete &= complete;
-    facts.project_name = document
-        .get("name")
-        .and_then(Value::as_str)
-        .map(|n| expand(n).0)
-        .filter(|n| !n.is_empty());
     if let Some(services) = document.get("services").and_then(Value::as_object) {
         // `serde_json::Map` is ordered by key unless a dependency turns on
         // `preserve_order`, so sort explicitly to stay deterministic.
@@ -320,37 +307,18 @@ fn matching_brace(text: &str) -> Option<usize> {
 fn parse_port(value: &Value) -> Option<PublishedPort> {
     match value {
         Value::Number(n) => Some(PublishedPort {
-            host_ip: None,
             host: None,
-            host_variable: None,
             container: u16::try_from(n.as_u64()?).ok()?,
-            protocol: "tcp".into(),
         }),
         Value::String(s) => parse_port_string(s),
         Value::Object(map) => {
             let container = port_number(map.get("target")?)?;
-            let (host, host_variable) = match map.get("published") {
-                Some(Value::String(s)) => {
-                    let (text, missing) = expand(s);
-                    (first_port(&text), missing.into_iter().next())
-                }
-                Some(other) => (port_number(other), None),
-                None => (None, None),
+            let host = match map.get("published") {
+                Some(Value::String(s)) => first_port(&expand(s).0),
+                Some(other) => port_number(other),
+                None => None,
             };
-            Some(PublishedPort {
-                host_ip: map
-                    .get("host_ip")
-                    .and_then(Value::as_str)
-                    .map(|s| expand(s).0),
-                host,
-                host_variable,
-                container,
-                protocol: map
-                    .get("protocol")
-                    .and_then(Value::as_str)
-                    .unwrap_or("tcp")
-                    .to_string(),
-            })
+            Some(PublishedPort { host, container })
         }
         _ => None,
     }
@@ -371,41 +339,26 @@ fn first_port(text: &str) -> Option<u16> {
 
 /// `[IP:][HOST:]CONTAINER[/PROTOCOL]`, IPv6 addresses bracketed.
 fn parse_port_string(text: &str) -> Option<PublishedPort> {
-    let (spec, protocol) = match text.rsplit_once('/') {
-        Some((spec, proto)) if matches!(proto, "tcp" | "udp" | "sctp") => (spec, proto),
-        _ => (text, "tcp"),
+    let spec = match text.rsplit_once('/') {
+        Some((spec, "tcp" | "udp" | "sctp")) => spec,
+        _ => text,
     };
-    let (expanded, missing) = expand(spec);
-    let mut host_ip = None;
+    let expanded = expand(spec).0;
     let mut rest = expanded.as_str();
+    // A bracketed IPv6 address leads; only the ports after it matter.
     if let Some(stripped) = rest.strip_prefix('[') {
-        let (ip, tail) = stripped.split_once(']')?;
-        host_ip = Some(ip.to_string());
+        let (_, tail) = stripped.split_once(']')?;
         rest = tail.strip_prefix(':').unwrap_or(tail);
     }
     let parts: Vec<&str> = rest.split(':').collect();
-    let (ip, host, container) = match parts.as_slice() {
-        [container] => (None, "", *container),
-        [host, container] => (None, *host, *container),
-        [ip, host, container] => (Some(*ip), *host, *container),
+    let (host, container) = match parts.as_slice() {
+        [container] => ("", *container),
+        [host, container] | [_, host, container] => (*host, *container),
         _ => return None,
     };
-    if host_ip.is_none() {
-        host_ip = ip.filter(|i| !i.is_empty()).map(str::to_string);
-    }
-    let host_port = first_port(host);
     Some(PublishedPort {
-        host_ip,
-        host: host_port,
-        host_variable: if host_port.is_none() && !host.is_empty()
-            || (host.is_empty() && !missing.is_empty() && parts.len() > 1)
-        {
-            missing.into_iter().next()
-        } else {
-            None
-        },
+        host: first_port(host),
         container: first_port(container)?,
-        protocol: protocol.to_string(),
     })
 }
 
@@ -717,25 +670,18 @@ mod tests {
     #[test]
     fn port_forms() {
         let p = parse_port_string("127.0.0.1:5433:5432").unwrap();
-        assert_eq!(
-            (p.host_ip.as_deref(), p.host, p.container),
-            (Some("127.0.0.1"), Some(5433), 5432)
-        );
+        assert_eq!((p.host, p.container), (Some(5433), 5432));
         let p = parse_port_string("5432").unwrap();
         assert_eq!((p.host, p.container), (None, 5432));
         let p = parse_port_string("8000-8010:8000-8010/udp").unwrap();
-        assert_eq!(
-            (p.host, p.container, p.protocol.as_str()),
-            (Some(8000), 8000, "udp")
-        );
+        assert_eq!((p.host, p.container), (Some(8000), 8000));
+        // A port that comes from a variable without a default is unknown.
         let p = parse_port_string("${DB_PORT}:5432").unwrap();
-        assert_eq!(
-            (p.host, p.host_variable.as_deref()),
-            (None, Some("DB_PORT"))
-        );
+        assert_eq!((p.host, p.container), (None, 5432));
         let p = parse_port_string("${DB_PORT:-5433}:5432").unwrap();
-        assert_eq!((p.host, p.host_variable), (Some(5433), None));
+        assert_eq!(p.host, Some(5433));
         let p = parse_port_string("[::1]:6379:6379").unwrap();
-        assert_eq!((p.host_ip.as_deref(), p.host), (Some("::1"), Some(6379)));
+        assert_eq!((p.host, p.container), (Some(6379), 6379));
+        assert!(parse_port_string("[::1:6379").is_none());
     }
 }

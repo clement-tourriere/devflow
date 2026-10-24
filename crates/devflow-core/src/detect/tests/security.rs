@@ -160,7 +160,7 @@ fn huge_files_are_skipped_with_a_warning() {
 
     assert!(facts.compose.is_none());
     assert!(facts.env.files.is_empty());
-    assert!(!facts.env.has_database_keys);
+    assert!(facts.env.keys.is_empty());
     assert!(
         facts
             .toolchain
@@ -257,7 +257,7 @@ fn env_values_are_never_returned_even_in_odd_lines() {
     // Names that merely *look* like keys on continuation lines are the worst case; values never appear.
     assert!(!json.contains("still_a_value_line"));
     assert!(!json.contains("first"));
-    assert_eq!(facts.env.files[0].path, ".env");
+    assert_eq!(facts.env.files[0], ".env");
 }
 
 #[test]

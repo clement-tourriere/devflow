@@ -1,5 +1,5 @@
 //! mise configuration and language version files.
-use super::facts::{MiseEnvEntry, MiseFacts, ToolchainFacts, VersionFile};
+use super::facts::{MiseEnvEntry, MiseFacts, ToolchainFacts};
 use super::manifest::parse_toml;
 use super::push_unique;
 use super::repo::{Repo, join};
@@ -205,7 +205,6 @@ fn mise(repo: &Repo) -> Option<MiseFacts> {
             );
             // Every entry counts, repeated ones included: listing a file
             // twice applies it twice, and the second time it wins again.
-            facts.env_files.push(entry.path.clone());
             facts.env_entries.push(entry);
         }
     }
@@ -325,57 +324,24 @@ fn collect_file_tasks(repo: &Repo, dir: &str, prefix: &str, out: &mut BTreeSet<S
     }
 }
 
-fn version_files(repo: &Repo) -> Vec<VersionFile> {
-    const FILES: [(&str, &str); 6] = [
-        (".nvmrc", "node"),
-        (".node-version", "node"),
-        (".python-version", "python"),
-        (".ruby-version", "ruby"),
-        ("rust-toolchain.toml", "rust"),
-        ("rust-toolchain", "rust"),
+/// The language version files at the root, by name. Only the names: nothing
+/// reads what a pin says (the wizard lists the file, no proposal depends on the
+/// version), so no pin file is opened.
+fn version_files(repo: &Repo) -> Vec<String> {
+    const FILES: [&str; 6] = [
+        ".nvmrc",
+        ".node-version",
+        ".python-version",
+        ".ruby-version",
+        "rust-toolchain.toml",
+        "rust-toolchain",
     ];
     let root = repo.list(".");
     FILES
         .iter()
-        .filter(|(file, _)| root.has_file(file))
-        .map(|(file, tool)| VersionFile {
-            file: (*file).to_string(),
-            tool: (*tool).to_string(),
-            version: read_version(repo, file),
-        })
+        .filter(|file| root.has_file(file))
+        .map(|file| (*file).to_string())
         .collect()
-}
-
-/// The version a pin file names.
-///
-/// The text comes from the general reader, which refuses dotenv files and
-/// credential stores even when the pin file is a link to one. As a second
-/// layer the value must be a single version-like token (`22`, `lts/iron`,
-/// `3.12.4`, `nightly-2024-05-01`; see [`is_version_token`]): anything else,
-/// such as a connection string or a `KEY value` pair, is dropped, with a
-/// warning that does not repeat it.
-fn read_version(repo: &Repo, file: &str) -> Option<String> {
-    let text = repo.read_head(file, 4096)?;
-    let value = if file == "rust-toolchain.toml" {
-        let table = parse_toml(repo, file, &text)?;
-        table
-            .get("toolchain")
-            .and_then(|t| t.get("channel"))
-            .and_then(toml::Value::as_str)
-            .map(str::to_string)?
-    } else {
-        // Plain files: first line that is not blank or a comment.
-        text.lines()
-            .map(str::trim)
-            .find(|l| !l.is_empty() && !l.starts_with('#'))?
-            .to_string()
-    };
-    if is_version_token(value.trim()) {
-        Some(value.trim().to_string())
-    } else {
-        repo.warn(file, "does not contain a version; ignored");
-        None
-    }
 }
 
 /// One version-like word: starts with a letter or digit, then letters,

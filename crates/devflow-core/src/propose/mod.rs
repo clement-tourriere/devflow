@@ -457,6 +457,7 @@ impl Proposal {
 
 /// The project root's `.git` common directory, where the apply journal lives.
 pub(crate) fn journal_dir(root: &Path) -> Result<std::path::PathBuf> {
+    crate::project::accept_git_extensions();
     let repo = git2::Repository::open(root).map_err(|error| {
         anyhow::anyhow!(
             "{} is not the top of a Git checkout ({}); devflow records the setup journal in the \

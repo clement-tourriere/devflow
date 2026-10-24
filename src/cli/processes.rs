@@ -93,7 +93,7 @@ impl PitchforkAction {
 }
 
 /// The workspace named, or the one containing the working directory.
-fn target(ctx: &Ctx, project: &Project, name: Option<&str>) -> Result<Workspace> {
+pub(super) fn target(ctx: &Ctx, project: &Project, name: Option<&str>) -> Result<Workspace> {
     match name {
         Some(name) => worktree::find(project, name)?
             .ok_or_else(|| anyhow!("no workspace named '{name}'; see `devflow list`")),
@@ -274,7 +274,7 @@ fn render_both(
     })
 }
 
-fn service_lines(
+pub(super) fn service_lines(
     changes: &container_services::Changes,
     palette: Palette,
     named: bool,
@@ -352,7 +352,7 @@ fn render_report(
     })
 }
 
-fn report_lines(report: &ProcessReport, palette: Palette) -> Vec<String> {
+pub(super) fn report_lines(report: &ProcessReport, palette: Palette) -> Vec<String> {
     use devflow_core::processes::Action;
     let mut lines: Vec<String> = report
         .warnings
@@ -470,7 +470,7 @@ fn ps_lines(statuses: &[ProcessStatus], all: bool, palette: Palette) -> Vec<Stri
     for status in statuses {
         if !status.installed {
             lines.push(palette.dim(
-                "pitchfork is missing or lacks a feature devflow needs; see `devflow pitchfork status`",
+                "pitchfork is missing or is not a release devflow supports; see `devflow pitchfork status`",
             ));
             break;
         }

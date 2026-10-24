@@ -5,7 +5,6 @@
 #
 #   version_exit       exists: --version fails like a mise shim without a version
 #   version            printed after "pitchfork " by --version (default: 2.29.0)
-#   missing            lines naming features whose --help does not mention the flag
 #   supervisor_down    exists: `supervisor status --json` says down
 #   list.json          printed by `list --json`
 #   on_list            a shell script `list` runs first (a change landing while
@@ -20,23 +19,6 @@
 #                      process group and holding their pipes (pids in stray.pids)
 d=$(dirname "$0")
 printf '%s|%s|%s\n' "$PWD" "$*" "${PITCHFORK_SUPERVISOR_AUTO_START-unset}" >> "$d/calls.log"
-
-help=0
-for a in "$@"; do
-  [ "$a" = "--help" ] && help=1
-done
-if [ "$help" = 1 ]; then
-  case "$1 $2" in
-    "list --help") feature="list --json"; flag="--json" ;;
-    "proxy status") feature="proxy status --json"; flag="--json" ;;
-    *) feature=""; flag="" ;;
-  esac
-  echo "Usage: pitchfork $1 [FLAGS]"
-  if [ -n "$flag" ] && ! { [ -f "$d/missing" ] && grep -qxF "$feature" "$d/missing"; }; then
-    echo "      $flag  a flag"
-  fi
-  exit 0
-fi
 
 # A process the call leaves behind in its group, holding the pipes (a supervisor
 # started by `start`, or a stray of a query); its pid is appended to stray.pids.

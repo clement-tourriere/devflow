@@ -9,7 +9,9 @@
 use super::{
     dialogs, processes, remedies, ui,
     ui::Tone,
-    widgets::{banner, caption, card, chip, empty_row, hoverable, mono, section_header},
+    widgets::{
+        banner, banner_with, caption, card, chip, empty_row, hoverable, mono, section_header,
+    },
 };
 use crate::{
     jobs,
@@ -18,20 +20,22 @@ use crate::{
         format_when, shorten_home,
     },
     redaction::{RefusalView, shown},
+    services::{FileOwner, sqlite_source_text},
     state::{AppState, TrustPurpose},
 };
 use devflow_core::{
-    config::CowCapability,
+    config::{CowCapability, Engine},
     cow::{self, Measure},
     receipt::{PayloadOutcome, Phase, PhaseState, Receipt, ServiceBinding},
     redact,
     remedy::Remedy,
     setup::{ServiceRun, WorkspaceStatus},
+    worktree::Workspace,
 };
 use gpui_kit::{
     assets::IconName as Lucide,
     component::{
-        ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _,
+        ActiveTheme as _, Disableable as _, Icon, IconName, Selectable as _, Sizable as _,
         button::{Button, ButtonVariants as _},
         clipboard::Clipboard,
         h_flex,
@@ -41,7 +45,10 @@ use gpui_kit::{
     prelude::*,
     *,
 };
-use std::{path::PathBuf, time::Duration};
+use std::{
+    path::{Path, PathBuf},
+    time::Duration,
+};
 use uuid::Uuid;
 
 // ---- plain data ------------------------------------------------------------------
@@ -80,8 +87,12 @@ pub struct Connection {
     pub role: String,
     /// A container engine's branch (no database or role of its own).
     pub container: bool,
-    /// The line under the name: the database and role, or how the branch
-    /// was cloned.
+    /// A `sqlite` database: the absolute path of its file in this checkout.
+    /// There is no host, port, role or password; `url` is the `sqlite:` URL of
+    /// that path, which is not a secret.
+    pub file: Option<PathBuf>,
+    /// The line under the name: the database and role, how the branch was
+    /// cloned, or the SQLite file and how it got its data.
     pub facts: String,
     /// `host:port` the host reaches.
     pub host_endpoint: Option<String>,
@@ -115,6 +126,43 @@ struct ProcessesData {
     target: Option<ProcessTarget>,
     refusal: Option<RefusalView>,
     busy: bool,
+}
+
+/// Where a workspace's hooks, `[env]` recipes and copy list come from, as the
+/// pane says it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RecipesView {
+    /// The sentence: whose file they are read from (or why none applies).
+    pub source: String,
+    /// The file they are read from, when there is one.
+    pub file: Option<PathBuf>,
+    /// The workspace has no usable recipes and none were chosen for it: it needs
+    /// a choice (the remedy), or a valid `devflow.toml` committed in it.
+    pub unavailable: bool,
+    /// The default workspace's recipes were chosen for it.
+    pub chosen: bool,
+    /// Shared sections of its own file that are not applied: the project's
+    /// services and the rest are the main checkout's.
+    pub differing: Vec<String>,
+}
+
+impl RecipesView {
+    pub fn of(report: &devflow_core::effective::RecipesReport) -> Self {
+        use devflow_core::effective::RecipesSource;
+        let mut sections: Vec<String> = Vec::new();
+        for differing in &report.differing {
+            if !sections.contains(&differing.section) {
+                sections.push(differing.section.clone());
+            }
+        }
+        Self {
+            source: shown(&report.source.describe()),
+            file: report.source.file().map(Path::to_path_buf),
+            unavailable: report.source.is_unavailable(),
+            chosen: matches!(report.source, RecipesSource::DefaultChosen { .. }),
+            differing: sections,
+        }
+    }
 }
 
 /// What the pane shows about one workspace.
@@ -152,6 +200,45 @@ pub struct Detail {
     /// The workspace is bound to container services (Valkey, Redis, MySQL):
     /// the header offers to stop and start them.
     pub container_services: bool,
+    /// Where the workspace's hooks, `[env]` and copy list come from.
+    pub recipes: Option<RecipesView>,
+    /// When it was suspended, as the header says it.
+    pub suspended: Option<String>,
+    /// Kept out of the idle suspension.
+    pub pinned: bool,
+    /// Whether the project's focus points here.
+    pub focus: FocusView,
+}
+
+/// Where the project's focus (the canonical loopback ports) points, as seen
+/// from one workspace.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FocusView {
+    /// Nobody asked for it, or it could not be read.
+    Off,
+    /// It points at this workspace: the ports it forwards.
+    Here(Vec<String>),
+    /// It points at another workspace, by name.
+    Elsewhere(String),
+}
+
+impl FocusView {
+    pub fn of(focus: Option<&devflow_core::focus::Status>, path: &std::path::Path) -> Self {
+        let Some(focus) = focus.filter(|f| f.running) else {
+            return Self::Off;
+        };
+        match &focus.workspace {
+            Some(workspace) if workspace.path == path => Self::Here(
+                focus
+                    .forwards
+                    .iter()
+                    .map(|f| format!("{} → {}", f.listen, f.to))
+                    .collect(),
+            ),
+            Some(workspace) => Self::Elsewhere(shown(&workspace.name)),
+            None => Self::Off,
+        }
+    }
 }
 
 /// One container service as the last entry of the workspace left it.
@@ -326,6 +413,7 @@ fn connection(key: &str, binding: &ServiceBinding, postgres_container: Option<&s
         database: binding.database.clone(),
         role: binding.role.clone(),
         container,
+        file: None,
         facts: redact::text(&match ServiceClone::of(key, binding) {
             Some(clone) if container => {
                 // A MySQL branch has a database of its own; Valkey has none.
@@ -351,6 +439,38 @@ fn connection(key: &str, binding: &ServiceBinding, postgres_container: Option<&s
             "shared: another workspace created it"
         },
         scratch,
+    }
+}
+
+/// A `sqlite` service's database in this workspace: a file, with no host,
+/// port, role or password. Its path and URL are recomputed from where the
+/// checkout is now (the receipt's URL is only what it was when the file was
+/// made), and are not secrets.
+fn sqlite_connection(key: &str, binding: &ServiceBinding, workspace: &Workspace) -> Connection {
+    let file = workspace.path.join(&binding.database);
+    let owner = FileOwner::of(workspace.is_default, binding.owned, true);
+    let how = match binding.cloned.as_ref().and_then(|c| c.method) {
+        Some(method) => format!("cloned by {method}"),
+        None if binding.owned => "nothing was cloned".to_string(),
+        None if workspace.is_default => "the project's own file, left alone".to_string(),
+        None => "already in the workspace, left alone".to_string(),
+    };
+    Connection {
+        service: key.to_string(),
+        engine: binding.engine.to_string(),
+        database: binding.database.clone(),
+        role: String::new(),
+        container: false,
+        facts: redact::text(&format!("SQLite file {} · {how}", binding.database)),
+        host_endpoint: None,
+        container_endpoint: None,
+        url: devflow_core::sqlite::url_of(&file),
+        container_url: None,
+        file: Some(file),
+        // "workspace:NAME", "snapshot:NAME@vN": a name can look like a credential.
+        source: redact::text(&sqlite_source_text(&binding.source)),
+        ownership: owner.label(),
+        scratch: Vec::new(),
     }
 }
 
@@ -398,7 +518,13 @@ impl Detail {
                 r.services
                     .iter()
                     .filter(|(_, binding)| !binding.orphaned)
-                    .map(|(key, binding)| connection(key, binding, container))
+                    .map(|(key, binding)| {
+                        if binding.engine.is_file() {
+                            sqlite_connection(key, binding, &status.workspace)
+                        } else {
+                            connection(key, binding, container)
+                        }
+                    })
                     .collect()
             })
             .unwrap_or_default();
@@ -415,7 +541,7 @@ impl Detail {
             let (_, binding) = r
                 .services
                 .iter()
-                .find(|(_, b)| !b.orphaned && !b.engine.is_container())?;
+                .find(|(_, b)| !b.orphaned && b.engine == Engine::Postgres)?;
             let branch = binding
                 .branch_id
                 .and_then(|id| model.database.branches.iter().find(|b| b.id == id));
@@ -465,6 +591,10 @@ impl Detail {
                     .values()
                     .any(|binding| !binding.orphaned && binding.engine.is_container())
             }),
+            recipes: status.recipes.as_ref().map(RecipesView::of),
+            suspended: receipt.and_then(|r| r.suspended_at).map(format_when),
+            pinned: receipt.is_some_and(|r| r.pinned),
+            focus: FocusView::of(model.focus.as_ref(), &status.workspace.path),
             drift: status.drift.as_ref().map(|drift| shown(&drift.describe())),
             env_file: status
                 .env_file
@@ -501,10 +631,16 @@ impl Detail {
         self.remedies.iter().find(|r| r.kind() == kind)
     }
 
-    /// Phases that went wrong or were left for someone to resolve.
+    /// Phases that went wrong or were left for someone to resolve. A workspace
+    /// without recipes has one problem, which the recipes banner says (its
+    /// payload, `[env]` and hooks phases all wait for the same choice).
     pub fn problems(&self) -> Vec<&PhaseRow> {
+        let no_recipes = self.recipes.as_ref().is_some_and(|r| r.unavailable);
         self.phases
             .iter()
+            .filter(|p| {
+                !(no_recipes && matches!(p.phase, Phase::Payload | Phase::Env | Phase::Hooks))
+            })
             .filter(|p| p.state == PhaseState::Failed || (p.required_skip && !p.deliberate))
             .collect()
     }
@@ -769,6 +905,125 @@ impl WorkspaceDetailView {
                 });
             })
         };
+        // Rest the workspace (or enter it again), keep it out of the idle
+        // suspension, point the focus at it: each calls core through a job.
+        let idle = busy
+            || matches!(
+                detail.state,
+                WorkspaceState::Missing | WorkspaceState::Busy | WorkspaceState::NotSetUp
+            );
+        let found = |state: &Entity<AppState>, at: &PathBuf, cx: &App| {
+            state.read(cx).selection.current().and_then(|model| {
+                Some((
+                    model.project_ref(),
+                    model.workspace_at(at)?.workspace.clone(),
+                ))
+            })
+        };
+        let rest = {
+            let (state, at) = (self.state.clone(), detail.path.clone());
+            let suspended = detail.suspended.is_some();
+            Button::new(if suspended {
+                "detail-resume"
+            } else {
+                "detail-suspend"
+            })
+            .icon(if suspended {
+                IconName::Play
+            } else {
+                IconName::Moon
+            })
+            .ghost()
+            .small()
+            .tooltip(if suspended {
+                "Resume: enter the workspace again, which starts its containers"
+            } else {
+                "Suspend: stop the workspace's own containers and daemons; its data is kept"
+            })
+            .disabled(idle)
+            .on_click(move |_, window, cx| {
+                let Some((owner, workspace)) = found(&state, &at, cx) else {
+                    return;
+                };
+                if suspended {
+                    let (app, path) = (state.clone(), workspace.path.clone());
+                    dialogs::with_trust(
+                        &state,
+                        &path,
+                        TrustPurpose::Setup,
+                        window,
+                        cx,
+                        move |trust, window, cx| {
+                            let (owner, workspace) = (owner.clone(), workspace.clone());
+                            app.update(cx, |s, cx| {
+                                s.resume_workspace(owner, workspace, trust, window, cx)
+                            });
+                        },
+                    );
+                } else {
+                    state.update(cx, |s, cx| {
+                        s.suspend_workspace(owner, workspace, window, cx)
+                    });
+                }
+            })
+        };
+        let pin = {
+            let (state, at) = (self.state.clone(), detail.path.clone());
+            let pinned = detail.pinned;
+            Button::new("detail-pin")
+                .icon(Lucide::Pin)
+                .ghost()
+                .small()
+                .selected(pinned)
+                .tooltip(if pinned {
+                    "Pinned: the idle suspension leaves this workspace alone. Click to unpin"
+                } else {
+                    "Pin: keep this workspace out of the idle suspension"
+                })
+                .disabled(idle)
+                .on_click(move |_, window, cx| {
+                    let Some((owner, workspace)) = found(&state, &at, cx) else {
+                        return;
+                    };
+                    state.update(cx, |s, cx| {
+                        s.pin_workspace(owner, workspace, !pinned, window, cx)
+                    });
+                })
+        };
+        let focus = {
+            let (state, at) = (self.state.clone(), detail.path.clone());
+            let here = matches!(detail.focus, FocusView::Here(_));
+            Button::new("detail-focus")
+                .icon(Lucide::Crosshair)
+                .ghost()
+                .small()
+                .selected(here)
+                .tooltip(match &detail.focus {
+                    FocusView::Here(_) => {
+                        "Focused: the canonical ports reach this workspace. Click to stop the focus"
+                            .to_string()
+                    }
+                    FocusView::Elsewhere(name) => {
+                        format!("The focus is on {name}. Click to point it here")
+                    }
+                    FocusView::Off => {
+                        "Focus: make the canonical ports (3000, …) reach this workspace".to_string()
+                    }
+                })
+                .disabled(idle)
+                .on_click(move |_, window, cx| {
+                    let Some((owner, workspace)) = found(&state, &at, cx) else {
+                        return;
+                    };
+                    state.update(cx, |s, cx| {
+                        if here {
+                            s.stop_focus(owner, window, cx)
+                        } else {
+                            s.focus_workspace(owner, workspace, window, cx)
+                        }
+                    });
+                })
+        };
         let retry = {
             let state = self.state.clone();
             // Found again by its checkout when clicked: its name is a label.
@@ -847,13 +1102,48 @@ impl WorkspaceDetailView {
                                     Tone::Neutral,
                                     "The main checkout. It cannot be removed.",
                                 ))
-                            }),
+                            })
+                            .when_some(detail.suspended.clone(), |row, since| {
+                                row.child(ui::pill(
+                                    "detail-suspended",
+                                    "suspended",
+                                    Tone::Info,
+                                    format!(
+                                        "Suspended since {since}: its containers and daemons are stopped and its data is kept"
+                                    ),
+                                ))
+                            })
+                            .when(detail.pinned, |row| {
+                                row.child(ui::pill(
+                                    "detail-pinned",
+                                    "pinned",
+                                    Tone::Neutral,
+                                    "Kept out of the idle suspension",
+                                ))
+                            })
+                            .when_some(
+                                match &detail.focus {
+                                    FocusView::Here(ports) => Some(ports.join(", ")),
+                                    _ => None,
+                                },
+                                |row, ports| {
+                                    row.child(ui::pill(
+                                        "detail-focused",
+                                        "focus",
+                                        Tone::Success,
+                                        format!("The canonical ports reach this workspace: {ports}"),
+                                    ))
+                                },
+                            ),
                     )
                     .child(
                         h_flex()
                             .gap_1()
                             .items_center()
                             .child(retry)
+                            .child(rest)
+                            .child(pin)
+                            .child(focus)
                             .when(detail.container_services, |row| {
                                 row.child(services(false)).child(services(true))
                             })
@@ -1013,6 +1303,9 @@ impl WorkspaceDetailView {
                 cx.notify();
             }))
             .into_any_element();
+        // A SQLite file has no password: only the others are worth revealing.
+        let only_files =
+            !detail.connections.is_empty() && detail.connections.iter().all(|c| c.file.is_some());
         let mut body = v_flex().w_full();
         for conn in &detail.connections {
             let shown = |url: &str, masked: String| if reveal { url.to_string() } else { masked };
@@ -1044,7 +1337,11 @@ impl WorkspaceDetailView {
                             .child(
                                 Clipboard::new(SharedString::from(id))
                                     .value(url.to_string())
-                                    .tooltip("Copy the connection URL"),
+                                    .tooltip(match label {
+                                        "File" => "Copy the path of the file",
+                                        "URL" => "Copy the URL",
+                                        _ => "Copy the connection URL",
+                                    }),
                             ),
                     )
             };
@@ -1093,14 +1390,36 @@ impl WorkspaceDetailView {
                                 .text_color(ui::muted(cx))
                                 .child(conn.facts.clone()),
                         ),
-                )
-                .child(url_row(
+                );
+            block = match &conn.file {
+                // A SQLite file: its path and its URL, neither a secret; no
+                // host, port, role or password exist.
+                Some(file) => {
+                    let path = file.display().to_string();
+                    block
+                        .child(url_row(
+                            format!("connection-copy-path-{}", conn.service),
+                            "File",
+                            &None,
+                            &path,
+                            redact::text(&shorten_home(file)),
+                        ))
+                        .child(url_row(
+                            format!("connection-copy-{}", conn.service),
+                            "URL",
+                            &None,
+                            &conn.url,
+                            conn.masked_url(),
+                        ))
+                }
+                None => block.child(url_row(
                     format!("connection-copy-{}", conn.service),
                     "From this machine",
                     &conn.host_endpoint,
                     &conn.url,
                     conn.masked_url(),
-                ));
+                )),
+            };
             if let (Some(url), Some(masked)) = (&conn.container_url, conn.masked_container_url()) {
                 block = block.child(url_row(
                     format!("connection-copy-container-{}", conn.service),
@@ -1163,8 +1482,12 @@ impl WorkspaceDetailView {
             .child(section_header(
                 Lucide::Database,
                 "Connections",
-                Some("passwords are masked until you ask".into()),
-                (!detail.connections.is_empty()).then_some(toggle),
+                Some(if only_files {
+                    "files have no password".into()
+                } else {
+                    "passwords are masked until you ask".into()
+                }),
+                (!detail.connections.is_empty() && !only_files).then_some(toggle),
                 cx,
             ))
             .child(body)
@@ -1175,6 +1498,66 @@ impl WorkspaceDetailView {
                     cx,
                 ))
             })
+            .test_support()
+    }
+
+    /// Where the workspace's hooks, `[env]` and copy list come from: its own
+    /// branch's `devflow.toml`, the main checkout's, or none. Which file is
+    /// shown, never what is in it.
+    fn recipes_card(&self, detail: &Detail, cx: &mut Context<Self>) -> impl IntoElement {
+        let recipes = detail.recipes.clone();
+        card(cx)
+            .id("detail-recipes")
+            .child(section_header(
+                Lucide::GitBranch,
+                "Recipes",
+                Some("hooks, [env] and the copy list".into()),
+                None,
+                cx,
+            ))
+            .child(
+                v_flex()
+                    .gap_1()
+                    .p_3()
+                    .text_sm()
+                    .when_some(recipes, |col, recipes| {
+                        col.child(
+                            div()
+                                .id("recipes-source")
+                                .child(if recipes.unavailable {
+                                    recipes.source.clone()
+                                } else {
+                                    format!("Read from {}.", recipes.source)
+                                })
+                                .test_support(),
+                        )
+                        .when(!recipes.differing.is_empty(), |col| {
+                            col.child(
+                                div()
+                                    .id("recipes-differing")
+                                    .text_color(ui::muted(cx))
+                                    .child(format!(
+                                        "{} in this workspace's own file {} not applied: the \
+                                         project's services, data and integrations come from the \
+                                         main checkout.",
+                                        recipes.differing.join(", "),
+                                        if recipes.differing.len() == 1 {
+                                            "is"
+                                        } else {
+                                            "are"
+                                        },
+                                    )),
+                            )
+                        })
+                    })
+                    .when(detail.recipes.is_none(), |col| {
+                        col.child(
+                            div()
+                                .text_color(ui::muted(cx))
+                                .child("This checkout's directory is missing."),
+                        )
+                    }),
+            )
             .test_support()
     }
 
@@ -1300,7 +1683,7 @@ impl WorkspaceDetailView {
                 let unusable = pitchfork.detection.as_ref().is_some_and(|d| !d.usable());
                 body = body.child(if unusable {
                     empty_row(
-                        "pitchfork is not installed or lacks what devflow uses, so this project's processes cannot run. The Daemons tab shows how to get it.",
+                        "pitchfork is not installed or is not a release devflow supports, so this project's processes cannot run. The Daemons tab shows how to get it.",
                         Some(
                             Button::new("detail-open-daemons")
                                 .label("Open Daemons")
@@ -1577,6 +1960,37 @@ impl WorkspaceDetailView {
                 .into_any_element()
             })
             .collect();
+        // No recipes of its own and none chosen: what core offers is the choice
+        // of the default workspace's (a button), not "run setup again".
+        let recipes: Vec<AnyElement> = detail
+            .recipes
+            .iter()
+            .filter(|recipes| recipes.unavailable)
+            .map(|recipes| {
+                // Core's remedies, in its order: the choice, and when the
+                // problem is a file nobody committed, that file.
+                banner_with(
+                    Tone::Warning,
+                    Lucide::TriangleAlert,
+                    recipes.source.clone(),
+                    [
+                        ("problem-use-default-recipes", "use_default_recipes"),
+                        ("problem-open-recipes-file", "open_file"),
+                    ]
+                    .into_iter()
+                    .filter_map(|(id, kind)| {
+                        detail.remedy(kind).map(|remedy| {
+                            remedies::button_with_id(&self.state, id.into(), remedy, false)
+                        })
+                    })
+                    .collect(),
+                    cx,
+                )
+                .id("problem-recipes")
+                .test_support()
+                .into_any_element()
+            })
+            .collect();
         let phases = detail.problems().into_iter().map(|row| {
             let failed = row.state == PhaseState::Failed;
             let text = match &row.detail {
@@ -1625,6 +2039,7 @@ impl WorkspaceDetailView {
         });
         drift
             .chain(env_file)
+            .chain(recipes)
             .chain(phases)
             .chain(services)
             .collect()
@@ -1678,6 +2093,7 @@ impl Render for WorkspaceDetailView {
                             .min_w_0()
                             .gap_3()
                             .child(self.timeline(&detail, cx))
+                            .child(self.recipes_card(&detail, cx))
                             .child(self.disk(&detail, cx)),
                     )
                     .child(
@@ -1853,8 +2269,148 @@ mod tests {
             busy: false,
             drift: None,
             env_file: None,
+            recipes: None,
         };
         (model, status)
+    }
+
+    /// The fixture's workspace with a SQLite binding of service `app` (and the
+    /// PostgreSQL one too, unless `only` says otherwise).
+    fn with_sqlite(
+        only: bool,
+        owned: bool,
+        is_default: bool,
+        cloned: Option<devflow_core::services::catalog::CloneMethod>,
+        source: &str,
+    ) -> (ProjectModel, WorkspaceStatus) {
+        use devflow_core::receipt::CloneReport;
+        let (model, mut status) = fixture();
+        status.workspace.is_default = is_default;
+        let receipt = status.receipt.as_mut().unwrap();
+        if only {
+            receipt.services.clear();
+        }
+        receipt.services.insert(
+            "app".into(),
+            ServiceBinding::sqlite(
+                Uuid::new_v4(),
+                "db/app.sqlite3".into(),
+                // Where the file was when it was made: not where it is now.
+                "sqlite:///somewhere/else/db/app.sqlite3".into(),
+                source.into(),
+                owned,
+                CloneReport {
+                    method: cloned,
+                    ..CloneReport::default()
+                },
+                None,
+            ),
+        );
+        (model, status)
+    }
+
+    #[test]
+    fn a_sqlite_binding_reads_as_a_file_with_no_server_role_or_password() {
+        use devflow_core::services::catalog::CloneMethod;
+        let (model, status) = with_sqlite(
+            true,
+            true,
+            false,
+            Some(CloneMethod::Reflink),
+            "workspace:main",
+        );
+        let detail = Detail::of(&model, &status);
+        let [conn] = &detail.connections[..] else {
+            panic!("{:?}", detail.connections);
+        };
+        assert_eq!(conn.service, "app");
+        assert_eq!(conn.engine, "sqlite");
+        assert!(!conn.container && conn.role.is_empty());
+        assert_eq!(conn.facts, "SQLite file db/app.sqlite3 · cloned by reflink");
+        // No host, port or container endpoint exist for a file.
+        assert!(conn.host_endpoint.is_none() && conn.container_endpoint.is_none());
+        assert!(conn.container_url.is_none() && conn.scratch.is_empty());
+        // The path and the URL follow the checkout's present location, not the
+        // receipt's text, and are not secrets.
+        let file = PathBuf::from("/tmp/shop.worktrees/feature/db/app.sqlite3");
+        assert_eq!(conn.file.as_deref(), Some(file.as_path()));
+        assert_eq!(
+            conn.url,
+            "sqlite:///tmp/shop.worktrees/feature/db/app.sqlite3"
+        );
+        assert_eq!(conn.masked_url(), conn.url);
+        assert_eq!(conn.source, "workspace main");
+        assert_eq!(conn.ownership, "created by this workspace");
+        // Nothing here sizes a PostgreSQL branch or starts a container.
+        assert!(detail.database.is_none());
+        assert!(detail.clones.is_empty());
+        assert!(!detail.container_services);
+    }
+
+    #[test]
+    fn a_sqlite_file_says_whether_it_was_cloned_or_left_alone() {
+        let facts = |owned, is_default, source| {
+            let (model, status) = with_sqlite(true, owned, is_default, None, source);
+            let detail = Detail::of(&model, &status);
+            (
+                detail.connections[0].facts.clone(),
+                detail.connections[0].ownership,
+            )
+        };
+        assert_eq!(
+            facts(true, false, "empty"),
+            (
+                "SQLite file db/app.sqlite3 · nothing was cloned".to_string(),
+                "created by this workspace"
+            )
+        );
+        assert_eq!(
+            facts(false, false, "existing"),
+            (
+                "SQLite file db/app.sqlite3 · already in the workspace, left alone".to_string(),
+                "was already in the workspace"
+            )
+        );
+        assert_eq!(
+            facts(false, true, "existing"),
+            (
+                "SQLite file db/app.sqlite3 · the project's own file, left alone".to_string(),
+                "the project's own file"
+            )
+        );
+    }
+
+    #[test]
+    fn a_sqlite_service_does_not_stand_in_for_the_postgres_branch() {
+        // `app` sorts before `db`: it used to be taken for "the database".
+        let (model, status) = with_sqlite(false, true, false, None, "empty");
+        let detail = Detail::of(&model, &status);
+        let disk = detail
+            .database
+            .as_ref()
+            .expect("the PostgreSQL branch is sized");
+        assert_eq!(disk.size_bytes, Some(392 * 1024 * 1024));
+        let engines: Vec<_> = detail
+            .connections
+            .iter()
+            .map(|c| c.engine.as_str())
+            .collect();
+        assert_eq!(engines, ["sqlite", "postgres"]);
+        // The line for the PostgreSQL branch is the only one that talks about
+        // a database branch.
+        let lines = disk_lines(&[], detail.database.as_ref(), &detail.clones);
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(lines[0].starts_with("Database branch: 392.0 MB logical"));
+    }
+
+    #[test]
+    fn a_source_that_looks_like_a_credential_is_drawn_masked_for_a_file_too() {
+        // kingfisher:ignore
+        let (model, status) = with_sqlite(true, true, false, None, "workspace:password=hunter2");
+        let detail = Detail::of(&model, &status);
+        let conn = &detail.connections[0];
+        assert_eq!(conn.source, "workspace password=***");
+        assert!(!format!("{conn:?}").contains("hunter2"));
     }
 
     #[test]
@@ -1917,6 +2473,116 @@ mod tests {
         assert_eq!(detail.payload.len(), 2);
         let db = detail.database.as_ref().unwrap();
         assert_eq!(db.size_bytes, Some(392 * 1024 * 1024));
+    }
+
+    #[test]
+    fn a_workspace_without_recipes_has_one_problem_and_the_choice_as_its_button() {
+        use devflow_core::effective::{
+            Differing, ProblemKind, RecipesProblem, RecipesReport, RecipesSource,
+        };
+        let (mut model, mut status) = fixture();
+        let file = PathBuf::from("/tmp/shop.worktrees/feature/devflow.toml");
+        let detail = Detail::of(&model, &status);
+        assert!(
+            detail.recipes.is_none(),
+            "a listing without the report says nothing"
+        );
+
+        // Payload, `[env]` and hooks all wait for the same choice.
+        let why = "no recipes of its own (devflow.toml does not exist)";
+        for phase in [Phase::Payload, Phase::Env, Phase::Hooks] {
+            status
+                .receipt
+                .as_mut()
+                .unwrap()
+                .skip_required(phase, why.into());
+        }
+        let report = |source| RecipesReport {
+            source,
+            digest: String::new(),
+            shared: PathBuf::from("/tmp/shop/devflow.toml"),
+            local: None,
+            ignored_local: None,
+            differing: Vec::new(),
+            choice: None,
+        };
+        status.recipes = Some(report(RecipesSource::Unavailable {
+            because: RecipesProblem {
+                kind: ProblemKind::Missing,
+                file: file.clone(),
+                message: "devflow.toml does not exist".into(),
+            },
+        }));
+        let detail = Detail::of(&model, &status);
+        let recipes = detail.recipes.as_ref().unwrap();
+        assert!(recipes.unavailable && !recipes.chosen && recipes.file.is_none());
+        assert!(
+            detail.problems().is_empty(),
+            "one banner says it, not one per phase: {:?}",
+            detail
+                .problems()
+                .iter()
+                .map(|p| p.phase)
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            !recipes.source.contains("`devflow"),
+            "the app never shows a command line: {}",
+            recipes.source
+        );
+
+        // The choice is core's remedy, drawn as a button.
+        let project = crate::ops::tests_support::project_with_hooks(&[]);
+        model.project = Some(std::sync::Arc::new(project));
+        let remedies = status.remedies(model.project.as_ref().unwrap());
+        assert_eq!(
+            remedies.first(),
+            Some(&Remedy::UseDefaultRecipes {
+                workspace: status.workspace.path.clone()
+            })
+        );
+        assert_eq!(
+            Remedy::UseDefaultRecipes {
+                workspace: PathBuf::new()
+            }
+            .kind(),
+            "use_default_recipes"
+        );
+
+        // The choice made: the recipes come from the default workspace's file.
+        status.recipes = Some(report(RecipesSource::DefaultChosen {
+            file: PathBuf::from("/tmp/shop/devflow.toml"),
+            because: RecipesProblem {
+                kind: ProblemKind::Missing,
+                file,
+                message: "devflow.toml does not exist".into(),
+            },
+        }));
+        let detail = Detail::of(&model, &status);
+        let recipes = detail.recipes.as_ref().unwrap();
+        assert!(recipes.chosen && !recipes.unavailable);
+        assert_eq!(
+            recipes.file.as_deref(),
+            Some(Path::new("/tmp/shop/devflow.toml"))
+        );
+
+        // A branch file's shared sections are named, once each, never valued.
+        let mut own = report(RecipesSource::Workspace {
+            file: PathBuf::from("/tmp/shop.worktrees/feature/devflow.toml"),
+        });
+        own.differing = vec![
+            Differing {
+                file: PathBuf::from("/tmp/shop.worktrees/feature/devflow.toml"),
+                section: "[services.db]".into(),
+            },
+            Differing {
+                file: PathBuf::from("/tmp/shop.worktrees/feature/devflow.toml"),
+                section: "[services.db]".into(),
+            },
+        ];
+        status.recipes = Some(own);
+        let detail = Detail::of(&model, &status);
+        assert_eq!(detail.recipes.unwrap().differing, ["[services.db]"]);
     }
 
     #[test]

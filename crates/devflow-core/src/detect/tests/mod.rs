@@ -71,10 +71,62 @@ fn process<'a>(facts: &'a Facts, name: &str, source: ProcessSource) -> Option<&'
         .find(|p| p.name == name && p.source == source)
 }
 
+/// What a person would be told of a process: the shell rendering of its
+/// argument vector, or `<file>: <process>` for a Procfile entry.
+fn shown(process: &ProcessFact) -> Option<String> {
+    match process.launch.as_ref()? {
+        launch @ ProcessLaunch::Argv { .. } => launch.shell_line(),
+        ProcessLaunch::Procfile { file, process } => Some(format!("{file}: {process}")),
+    }
+}
+
 fn service<'a>(facts: &'a Facts, name: &str) -> &'a ComposeService {
     facts
         .compose
         .as_ref()
         .and_then(|c| c.services.iter().find(|s| s.name == name))
         .unwrap_or_else(|| panic!("compose service {name} not found"))
+}
+
+/// Questions the tests ask of facts that no production code asks: the
+/// proposal reads the same facts through `PackageManagerFact::install_command`
+/// and `PythonProject::install_command`.
+impl Facts {
+    fn js_project(&self) -> Option<&JsProject> {
+        self.js
+            .iter()
+            .find(|p| p.path == ".")
+            .or_else(|| self.js.first())
+    }
+
+    fn js_install_command(&self) -> Option<&'static str> {
+        self.js_project()
+            .map(|p| p.package_manager.install_command())
+    }
+
+    fn js_install_commands(&self) -> Vec<(&str, &'static str)> {
+        self.js
+            .iter()
+            .map(|p| (p.path.as_str(), p.package_manager.install_command()))
+            .collect()
+    }
+
+    fn python_install_command(&self) -> Option<&'static str> {
+        self.python
+            .iter()
+            .find(|p| p.path == ".")
+            .or_else(|| self.python.first())
+            .and_then(PythonProject::install_command)
+    }
+
+    fn has_migration_tool(&self, tool: MigrationTool) -> bool {
+        self.migrations.iter().any(|m| m.tool == tool)
+    }
+
+    fn has_mise_task(&self, name: &str) -> bool {
+        self.toolchain
+            .mise
+            .as_ref()
+            .is_some_and(|m| m.tasks.iter().any(|t| t == name))
+    }
 }

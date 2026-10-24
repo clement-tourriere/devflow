@@ -224,6 +224,7 @@ pub fn pretty<T: serde::Serialize>(value: &T) -> String {
         "sql_server" => "SQL Server",
         "postgres" => "PostgreSQL",
         "mysql" => "MySQL",
+        "sqlite" => "SQLite",
         "mariadb" => "MariaDB",
         "mongodb" => "MongoDB",
         "clickhouse" => "ClickHouse",
@@ -311,7 +312,7 @@ pub fn chip_groups(facts: &Facts) -> Vec<ChipGroup> {
             _ => format!("mise: {}", mise.tools.join(", ")),
         });
     }
-    tooling.extend(facts.toolchain.version_files.iter().map(|f| f.file.clone()));
+    tooling.extend(facts.toolchain.version_files.iter().cloned());
     if facts.wiring.pitchfork.is_some() {
         tooling.push("pitchfork.toml".to_string());
     }
@@ -2502,6 +2503,7 @@ mod tests {
         assert_eq!(pretty(&Framework::Rails), "Rails");
         assert_eq!(pretty(&MigrationTool::GolangMigrate), "golang-migrate");
         assert_eq!(pretty(&Engine::Postgres), "PostgreSQL");
+        assert_eq!(pretty(&Engine::Sqlite), "SQLite");
         assert_eq!(pretty(&PackageManager::Pnpm), "pnpm");
         assert_eq!(pretty(&PackageManager::Bun), "Bun");
     }

@@ -8,17 +8,6 @@ use super::hardening::{ignored, scan_within};
 use super::*;
 use std::time::Duration;
 
-fn version_of(facts: &Facts, file: &str) -> Option<String> {
-    facts
-        .toolchain
-        .version_files
-        .iter()
-        .find(|v| v.file == file)
-        .unwrap_or_else(|| panic!("{file} is not a version file"))
-        .version
-        .clone()
-}
-
 // -- 1. a name checked is not a file opened ---------------------------------------------
 
 /// The reviewer's reproduction: `.nvmrc` alternates between a regular file and
@@ -134,8 +123,11 @@ fn r2_finding_2_a_file_with_another_name_is_never_read_as_text() {
     for canary in ["HARDLINK_CANARY", "LINKED_CANARY", "TOOLS_CANARY"] {
         assert!(!text.contains(canary), "{canary} leaked: {facts:#?}");
     }
-    assert_eq!(version_of(&facts, ".nvmrc"), None);
-    assert_eq!(version_of(&facts, ".python-version"), None);
+    // Listed by name; what the aliases lead to is not read.
+    assert_eq!(
+        facts.toolchain.version_files,
+        vec![".nvmrc", ".python-version"]
+    );
     let mise = facts.toolchain.mise.as_ref().expect("mise config file");
     assert_eq!(mise.config_files, vec![".tool-versions"]);
     assert!(mise.tools.is_empty(), "{:?}", mise.tools);
@@ -143,7 +135,7 @@ fn r2_finding_2_a_file_with_another_name_is_never_read_as_text() {
         facts
             .warnings
             .iter()
-            .any(|w| w.path == ".nvmrc" && w.message.contains("hard links")),
+            .any(|w| w.path == ".tool-versions" && w.message.contains("only its variable names")),
         "{:?}",
         facts.warnings
     );
@@ -171,45 +163,26 @@ fn r2_finding_2_a_file_read_by_a_general_reader_must_have_a_single_name() {
 }
 
 #[test]
-fn r2_finding_2_only_version_like_tokens_become_versions() {
-    for (value, expected) in [
-        ("22", Some("22")),
-        ("v22.1.0", Some("v22.1.0")),
-        ("lts/iron", Some("lts/iron")),
-        ("lts/*", Some("lts/*")),
-        ("20.x", Some("20.x")),
-        ("3.12.4", Some("3.12.4")),
-        ("pypy3.10-7.3.15", Some("pypy3.10-7.3.15")),
-        ("nightly-2024-05-01", Some("nightly-2024-05-01")),
-        ("  22  ", Some("22")),
-        ("postgresql://app:VERSION_CANARY@db/app", None), // kingfisher:ignore
-        ("TOKEN=VERSION_CANARY", None),
-        ("user@VERSION_CANARY", None),
-        ("a:VERSION_CANARY", None),
-        ("two VERSION_CANARY", None),
-        ("22 VERSION_CANARY", None),
-        ("-VERSION_CANARY", None),
-        (".VERSION_CANARY", None),
-        ("/VERSION_CANARY", None),
-        (&"v".repeat(65), None),
+fn r2_finding_2_a_version_files_text_is_never_read() {
+    for value in [
+        "22",
+        "lts/iron",
+        "postgresql://app:VERSION_CANARY@db/app", // kingfisher:ignore
+        "TOKEN=VERSION_CANARY",
+        "two VERSION_CANARY",
     ] {
         let repo = fixture(&[(".nvmrc", &format!("# pinned\n{value}\n"))]);
         let facts = scan_dir(&repo);
 
-        assert_eq!(
-            version_of(&facts, ".nvmrc").as_deref(),
-            expected,
-            "{value:?}"
-        );
+        assert_eq!(facts.toolchain.version_files, vec![".nvmrc"], "{value:?}");
         assert!(!json(&facts).contains("VERSION_CANARY"), "{value:?}");
     }
-    // The same rules apply to the channel of rust-toolchain.toml.
     let repo = fixture(&[(
         "rust-toolchain.toml",
         "[toolchain]\nchannel = \"stable VERSION_CANARY\"\n",
     )]);
     let facts = scan_dir(&repo);
-    assert_eq!(version_of(&facts, "rust-toolchain.toml"), None);
+    assert_eq!(facts.toolchain.version_files, vec!["rust-toolchain.toml"]);
     assert!(!json(&facts).contains("VERSION_CANARY"));
 }
 
@@ -353,7 +326,7 @@ fn r2_finding_4_procfile_commands_are_not_in_the_facts_at_all() {
         ("worker", "Procfile: worker"),
     ] {
         let found = process(&facts, name, ProcessSource::Procfile).expect(name);
-        assert_eq!(found.display.as_deref(), Some(display));
+        assert_eq!(shown(found).as_deref(), Some(display));
         assert_eq!(
             found.launch,
             Some(ProcessLaunch::Procfile {
@@ -364,14 +337,14 @@ fn r2_finding_4_procfile_commands_are_not_in_the_facts_at_all() {
     }
     let assets = process(&facts, "assets", ProcessSource::Procfile).expect("assets");
     assert_eq!(
-        assets.display.as_deref(),
+        shown(assets).as_deref(),
         Some("apps/web/Procfile.dev: assets")
     );
     // Every other source is an argument vector of names fixed by the scan.
     let dev = process(&facts, "dev", ProcessSource::PackageJson).expect("dev script");
-    assert_eq!(dev.display.as_deref(), Some("npm run dev"));
+    assert_eq!(shown(dev).as_deref(), Some("npm run dev"));
     let mise = process(&facts, "dev", ProcessSource::MiseTask).expect("mise task");
-    assert_eq!(mise.display.as_deref(), Some("mise run dev"));
+    assert_eq!(shown(mise).as_deref(), Some("mise run dev"));
 }
 
 // -- 5. a quote opens a string whatever the name before it ------------------------------
@@ -425,8 +398,7 @@ fn r2_finding_5_a_leading_byte_order_mark_is_not_part_of_the_first_name() {
     let facts = scan_dir(&repo);
 
     assert!(facts.env.has_key("DATABASE_URL"));
-    assert_eq!(facts.env.files[0].key_count, 2);
-    assert!(facts.env.has_database_keys);
+    assert!(facts.env.has_key("PORT"));
 }
 
 // -- 6. split indexes ----------------------------------------------------------------

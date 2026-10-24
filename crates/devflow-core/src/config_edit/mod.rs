@@ -182,28 +182,99 @@ impl std::fmt::Debug for FileState {
     }
 }
 
-/// The project's two configuration files.
+/// The two configuration files an edit works on.
+///
+/// Recipes are per workspace (see [`crate::effective`]): the project file is
+/// the main checkout's for the main checkout and for a workspace that chose the
+/// default recipes, and the workspace's own `devflow.toml` for a workspace
+/// that has one. `devflow.local.toml` is always the main checkout's: it
+/// overlays every workspace.
 #[derive(Debug, Clone)]
 pub struct ConfigFiles {
+    /// The project's main checkout: where `devflow.local.toml` is, and what
+    /// the project is opened from.
     pub root: PathBuf,
+    /// The directory whose project file this is: `root`, or a linked
+    /// worktree's.
+    pub project_dir: PathBuf,
     pub project: FileState,
     pub local: FileState,
+    /// Where the recipes of the workspace these files are for come from.
+    pub source: crate::effective::RecipesSource,
 }
 
 impl ConfigFiles {
     /// Read both files of the project rooted at `root`. Fails with
     /// [`NotInitialized`] when there is no project file.
     pub fn read(root: &Path) -> Result<Self> {
-        let project_path = Config::find_file(root).ok_or_else(|| {
+        Self::read_in(root, root)
+    }
+
+    /// Read the project file in `project_dir` (a workspace's own) and the
+    /// local overlay of the main checkout `root`.
+    pub fn read_in(project_dir: &Path, root: &Path) -> Result<Self> {
+        let project_path = Config::find_file(project_dir).ok_or_else(|| {
             anyhow::Error::new(NotInitialized {
-                root: root.to_path_buf(),
+                root: project_dir.to_path_buf(),
             })
         })?;
+        let source = if project_dir == root {
+            crate::effective::RecipesSource::Main {
+                file: project_path.clone(),
+            }
+        } else {
+            crate::effective::RecipesSource::Workspace {
+                file: project_path.clone(),
+            }
+        };
         Ok(Self {
             root: root.to_path_buf(),
+            project_dir: project_dir.to_path_buf(),
             project: read_state(project_path)?,
             local: read_state(root.join(LOCAL_CONFIG_FILE))?,
+            source,
         })
+    }
+
+    /// Read the same files again after an edit, with the same layout.
+    pub fn reread(&self) -> Result<Self> {
+        let mut files = Self::read_in(&self.project_dir, &self.root)?;
+        files.source = self.source.clone();
+        Ok(files)
+    }
+
+    /// The files an edit of the recipes of the workspace at `dir` works on: the
+    /// file its recipes come from. The main checkout and a workspace that chose
+    /// the default workspace's recipes edit the main checkout's; a workspace
+    /// with a valid `devflow.toml` of its own edits that. A workspace without
+    /// usable recipes has no file to edit: the error says so, with the choice
+    /// and the file as remedies.
+    pub fn read_for(project: &crate::project::Project, dir: &Path) -> Result<Self> {
+        use crate::effective::RecipesSource;
+        let at = project.at(dir);
+        match at.recipes() {
+            RecipesSource::Main { .. } => Self::read(&project.root),
+            RecipesSource::DefaultChosen { .. } => {
+                let mut files = Self::read(&project.root)?;
+                files.source = at.recipes();
+                Ok(files)
+            }
+            RecipesSource::Workspace { .. } => Self::read_in(dir, &project.root),
+            RecipesSource::Unavailable { because } => {
+                let mut problem = crate::remedy::Problem::new(format!(
+                    "this workspace has no recipes to edit: {}",
+                    because.message
+                ))
+                .with(crate::remedy::Remedy::UseDefaultRecipes {
+                    workspace: dir.to_path_buf(),
+                });
+                // A file that does not exist cannot be opened.
+                if because.kind != crate::effective::ProblemKind::Missing {
+                    problem = problem.with(crate::remedy::Remedy::OpenFile { path: because.file });
+                }
+                Err(problem.into_error())
+            }
+        }
     }
 
     pub fn file(&self, target: Target) -> &FileState {
@@ -215,7 +286,11 @@ impl ConfigFiles {
 
     /// The merged configuration, the way [`Config::load`] reads it.
     pub fn config(&self) -> Result<Config> {
-        layers(&self.project, self.local.text.as_deref())
+        layers(
+            &self.project,
+            self.local.text.as_deref(),
+            self.project_dir != self.root,
+        )
     }
 }
 
@@ -235,13 +310,20 @@ fn read_state(path: PathBuf) -> Result<FileState> {
     }
 }
 
-fn layers(project: &FileState, local: Option<&str>) -> Result<Config> {
+/// The configuration a project file and an overlay describe. A workspace's own
+/// file (`own_file`) is read with the overlay's recipe fields only: its shared
+/// fields are the main checkout's, which they already changed.
+fn layers(project: &FileState, local: Option<&str>, own_file: bool) -> Result<Config> {
     let project_text = project
         .text
         .as_deref()
         .context("the project file does not exist")?;
     let base_name = file_name(&project.path);
-    Config::parse_layers(project_text, &base_name, local, LOCAL_CONFIG_FILE)
+    if own_file {
+        Config::parse_branch_layers(project_text, &base_name, local, LOCAL_CONFIG_FILE)
+    } else {
+        Config::parse_layers(project_text, &base_name, local, LOCAL_CONFIG_FILE)
+    }
 }
 
 fn file_name(path: &Path) -> String {
@@ -291,7 +373,25 @@ impl std::fmt::Debug for Applied {
 /// ([`FileState::hash`]; `None` for a file that did not exist). If the file
 /// is different now, the error is [`ConfigChanged`] and nothing is written.
 pub fn apply(root: &Path, target: Target, expected: Option<&str>, edit: &Edit) -> Result<Applied> {
-    run(root, target, expected, edit, true)
+    run(root, root, target, expected, edit, true)
+}
+
+/// [`apply`] for the files [`ConfigFiles::read_for`] chose: the project file
+/// in `files.project_dir`, the local overlay of `files.root`.
+pub fn apply_to(
+    files: &ConfigFiles,
+    target: Target,
+    expected: Option<&str>,
+    edit: &Edit,
+) -> Result<Applied> {
+    run(
+        &files.project_dir,
+        &files.root,
+        target,
+        expected,
+        edit,
+        true,
+    )
 }
 
 /// [`apply`] without writing: the result a write would have.
@@ -301,10 +401,11 @@ pub fn preview(
     expected: Option<&str>,
     edit: &Edit,
 ) -> Result<Applied> {
-    run(root, target, expected, edit, false)
+    run(root, root, target, expected, edit, false)
 }
 
 fn run(
+    project_dir: &Path,
     root: &Path,
     target: Target,
     expected: Option<&str>,
@@ -314,7 +415,8 @@ fn run(
     edit.check_input(target)?;
     // Two editors at once (two terminals, the app) must not interleave their
     // read-check-write.
-    let go = || run_locked(root, target, expected, edit, write);
+    let go = || run_locked(project_dir, root, target, expected, edit, write);
+    crate::project::accept_git_extensions();
     match git2::Repository::open(root) {
         Ok(repo) => {
             crate::fsutil::with_lock(&repo.commondir().join("devflow/config-edit.lock"), go)
@@ -324,13 +426,14 @@ fn run(
 }
 
 fn run_locked(
+    project_dir: &Path,
     root: &Path,
     target: Target,
     expected: Option<&str>,
     edit: &Edit,
     write: bool,
 ) -> Result<Applied> {
-    let files = ConfigFiles::read(root)?;
+    let files = ConfigFiles::read_in(project_dir, root)?;
     let file = files.file(target);
     if file.hash.as_deref() != expected {
         return Err(ConfigChanged::new(file.path.clone()).into());
@@ -341,7 +444,46 @@ fn run_locked(
             file_name(&file.path)
         );
     }
-    let before = layers(&files.project, files.local.text.as_deref()).map_err(|error| {
+    // What a change leaves is judged as the project: the main checkout's own
+    // configuration (its project file with the overlay), and for a workspace's
+    // own file also that workspace's recipes next to the main checkout's shared
+    // sections. An overlay that makes the main checkout's configuration invalid
+    // (a recipe for a variable a service of the main checkout exports) is
+    // refused whichever workspace the edit was made in.
+    let own_file = project_dir != root;
+    let main_name;
+    let main_text = if own_file {
+        let path = Config::find_file(root).ok_or_else(|| {
+            anyhow::Error::new(NotInitialized {
+                root: root.to_path_buf(),
+            })
+        })?;
+        main_name = file_name(&path);
+        crate::config::read_text(&path)
+            .with_context(|| format!("cannot read {}", path.display()))?
+    } else {
+        main_name = file_name(&files.project.path);
+        files.project.text.clone().unwrap_or_default()
+    };
+    let judge = |project_text: &str, main_text: &str, local: Option<&str>| -> Result<Config> {
+        let main = Config::parse_layers(main_text, &main_name, local, LOCAL_CONFIG_FILE)?;
+        if !own_file {
+            return Ok(main);
+        }
+        let own = Config::parse_branch_layers(
+            project_text,
+            &file_name(&files.project.path),
+            local,
+            LOCAL_CONFIG_FILE,
+        )?;
+        crate::effective::combined(&main, &own)
+    };
+    let before = judge(
+        files.project.text.as_deref().unwrap_or_default(),
+        &main_text,
+        files.local.text.as_deref(),
+    )
+    .map_err(|error| {
         // The message is the configuration parser's, which names a key and
         // never repeats a value.
         error.context("the configuration is not valid as it is; fix it before editing it here")
@@ -368,16 +510,20 @@ fn run_locked(
             Some(new_text.clone()),
         ),
     };
-    let after = Config::parse_layers(
+    let after = judge(
         &project_text,
-        &file_name(&files.project.path),
+        // The main checkout's file is what the edit changes only when it is
+        // the project file being edited.
+        if own_file { &main_text } else { &project_text },
         local_text.as_deref(),
-        LOCAL_CONFIG_FILE,
     )
     .context("the edit would leave an invalid configuration; nothing was written")?;
 
     let scope_changed = {
-        let (a, b) = (Scope::build(&before, root), Scope::build(&after, root));
+        let (a, b) = (
+            Scope::build(&before, project_dir),
+            Scope::build(&after, project_dir),
+        );
         a.hooks != b.hooks || a.env != b.env
     };
     if changed && write {
@@ -408,6 +554,7 @@ fn run_locked(
 fn exclude_local_file(path: &Path, notes: &mut Vec<String>) {
     let name = file_name(path);
     let Some(dir) = path.parent() else { return };
+    crate::project::accept_git_extensions();
     let Ok(repo) = git2::Repository::discover(dir) else {
         return;
     };

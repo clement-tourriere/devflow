@@ -57,8 +57,16 @@ impl Service {
     /// and wait until it answers `AUTH` and `PING`.
     pub fn up(&self, id: Uuid) -> Result<Endpoint> {
         self.recover_touching(&[id])?;
-        let _held = self.hold(&[id])?;
-        self.bring_up(id, false)
+        let endpoint = {
+            let _held = self.hold(&[id])?;
+            self.bring_up(id, false)?
+        };
+        // A container that runs is not a workspace at rest. Whoever starts it
+        // (the workspace's activation, `up --services`, a single service's
+        // start, the app), the workspace that owns the branch loses its
+        // suspended mark.
+        crate::suspend::clear_mark_of_branch(&self.root, &self.key, id);
+        Ok(endpoint)
     }
 
     /// Stop the branch's container gracefully; the data stays in its volume.

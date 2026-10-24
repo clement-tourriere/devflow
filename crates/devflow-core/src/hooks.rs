@@ -121,6 +121,26 @@ impl HookReport {
 /// [`crate::env_owner`]) and `DEVFLOW_SETUP_ACTIVE=1`. Stops at the first
 /// failure. Each command gets its own process group and is killed (TERM, then
 /// KILL) when it exceeds its own `timeout`. Output lines go to `output` and to
+/// Create the log directory, one level, below a parent that must already be
+/// there: never an ancestor. The logs of a workspace live in its worktree's Git
+/// directory, which Git deletes with the worktree, possibly just after the
+/// caller looked: creating the missing path would bring that directory back and
+/// let the run go on for a worktree that is gone, so the run fails instead.
+fn create_log_dir(log_dir: &Path) -> Result<()> {
+    match std::fs::create_dir(log_dir) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && log_dir.is_dir() => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(e).with_context(|| {
+            format!(
+                "cannot create {}: its parent directory is gone (the worktree was removed), and \
+                 nothing is created in a directory that is not there",
+                log_dir.display()
+            )
+        }),
+        Err(e) => Err(e).with_context(|| format!("cannot create {}", log_dir.display())),
+    }
+}
+
 /// `<log_dir>/<timestamp>-<phase>.log`; a named command is announced with its
 /// name. Credentials are masked in both, and in the echoed command, before
 /// anything is written: secret-named variables and URL passwords in `env`, and
@@ -128,6 +148,9 @@ impl HookReport {
 /// such as an `[env]` recipe built on the database password). Output is masked
 /// a line at a time, so each line of a secret that spans several lines is
 /// masked on its own too when it has at least four characters.
+///
+/// `log_dir` may be missing, but its parent must be there: only the last level
+/// is created (see [`create_log_dir`]).
 pub fn run(
     phase: HookPhase,
     commands: &[HookCommand],
@@ -145,8 +168,7 @@ pub fn run(
             ok: true,
         });
     }
-    std::fs::create_dir_all(log_dir)
-        .with_context(|| format!("cannot create {}", log_dir.display()))?;
+    create_log_dir(log_dir)?;
     let log_path = log_dir.join(format!(
         "{}-{}.log",
         chrono::Utc::now().format("%Y%m%d-%H%M%S"),
@@ -541,6 +563,43 @@ mod tests {
             std::thread::sleep(Duration::from_millis(25));
         }
         false
+    }
+
+    /// The logs of a workspace go below its worktree's Git directory, which Git
+    /// deletes with the worktree: a missing parent of the log directory is an
+    /// error, not something to create (that would bring the directory back).
+    #[test]
+    fn the_log_directory_is_created_one_level_below_a_parent_that_is_there() {
+        let dir = tempfile::tempdir().unwrap();
+        let env = ChildEnv::plain(Default::default());
+        let command = [HookCommand::new("echo ran > ran", Duration::from_secs(30))];
+        let run_with = |log_dir: &Path| {
+            run(
+                HookPhase::Setup,
+                &command,
+                dir.path(),
+                &env,
+                &[],
+                log_dir,
+                &mut |_| {},
+            )
+        };
+        let error = run_with(&dir.path().join("gone").join("devflow").join("logs")).unwrap_err();
+        assert!(format!("{error:#}").contains("is gone"), "{error:#}");
+        assert!(
+            !dir.path().join("gone").exists(),
+            "nothing was brought back"
+        );
+        assert!(
+            !dir.path().join("ran").exists(),
+            "and the command did not run"
+        );
+
+        // The last level is created, and one that is there is used.
+        let logs = dir.path().join("logs");
+        assert!(run_with(&logs).unwrap().ok);
+        assert!(logs.is_dir());
+        assert!(run_with(&logs).unwrap().ok);
     }
 
     #[test]

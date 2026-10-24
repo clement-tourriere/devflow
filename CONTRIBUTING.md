@@ -1,6 +1,6 @@
 # Contributing to devflow
 
-Thanks for helping. devflow 1.0 is deliberately small: Git worktrees, copy-on-write payloads, PostgreSQL branches, trusted setup hooks, and a desktop app. Features that pitchfork (processes, proxy), mise (toolchains, dependencies, tasks) or Mr. Boxington (Rust build caches) already provide belong in those tools. Read [docs/plans/2026-10-10-devflow-1.0.md](docs/plans/2026-10-10-devflow-1.0.md) before proposing a new capability.
+Thanks for helping. devflow 1.0 is deliberately small: Git worktrees, copy-on-write payloads, data branches (PostgreSQL, Valkey, Redis, MySQL, SQLite), trusted setup hooks, the loop around agent hosts, and a desktop app. Features that pitchfork (processes, proxy), mise (toolchains, dependencies, tasks) or Mr. Boxington (Rust build caches) already provide belong in those tools. Read [docs/plans/2026-10-10-devflow-1.0.md](docs/plans/2026-10-10-devflow-1.0.md) before proposing a new capability.
 
 ## Getting started
 
@@ -28,11 +28,11 @@ Multi-feature builds and many worktrees can fill the disk; `mbx clean` reclaims 
 
 | Path | Description |
 | --- | --- |
-| `Cargo.toml`, `src/` | The `devflow` CLI: argument parsing, prompts, JSON output |
-| `crates/devflow-core` | Config, connection strings, project, registry, worktree, CoW, receipt, setup, hooks, trust, Git hook, env file, redaction, typed errors, `db` (admin, meta, steps, ops, reconcile, managed), doctor, pitchfork adapter and process gating (`pitchfork`, `processes`) |
+| `Cargo.toml`, `src/` | The `devflow` CLI: argument parsing, prompts, JSON output (`src/cli/`, one module per command family) |
+| `crates/devflow-core` | All behavior: configuration and its effective form per workspace, worktrees and payloads, receipts and the ledger, setup and activation, hooks, trust, the env file, `db` (PostgreSQL), `services` and `sqlite` (the other data services), `detect` and `propose` (`init`), `integrate` (agent hosts), `gc`, `suspend`, `focus`, `doctor`, pitchfork and process gating, redaction, typed errors and remedies. The full module map is in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) |
 | `crates/devflow-gui` | GPUI desktop app |
-| `tests/`, `crates/devflow-core/tests/` | End-to-end CLI tests; core workspace tests and the Docker database tests |
-| `docs/` | Architecture, migration guide, remote data hosts, design plans |
+| `tests/`, `crates/devflow-core/tests/` | End-to-end CLI tests (`cli.rs`, `cli_edit.rs`, `integrations.rs`, `agent_task.rs`), the documentation link check (`docs.rs`), core workspace, ledger, recipes, process, SQLite and schema tests, and the Docker database and service tests |
+| `docs/` | The user guide (`guide/`, one page per topic), the automation reference, architecture, migration guide, the generated JSON Schemas, design plans |
 | `examples/` | Sample configuration and an agent script |
 | `scripts/` | Installer, secret scanning, release version sync |
 | `mise.toml`, `hk.pkl`, `.cz.toml` | Tools and tasks, Git hooks, release configuration |
@@ -46,6 +46,7 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the module map and `CLAUDE.
 - Record intent before external effects, and make operations safe to re-run.
 - Use `anyhow::Context` rather than `.unwrap()`, and `anyhow::bail!` rather than `panic!` in library code.
 - Document public items with `///` comments.
+- A change to `crates/devflow-core/src/config.rs` (a key, a default, a doc comment) changes the JSON Schema of `devflow.toml`. Regenerate the committed copies and commit them with the change: `cargo run -q -p devflow -- config schema > docs/devflow.schema.json` and `cargo run -q -p devflow -- config schema --local > docs/devflow.local.schema.json`. A test fails with those lines when they are out of date.
 
 ### Commit messages
 
@@ -69,6 +70,7 @@ Scopes in use: `cli`, `core`, `config`, `worktree`, `cow`, `setup`, `hooks`, `tr
 - MySQL has its own: `cargo test -p devflow --test services_mysql_docker -- --ignored --test-threads=1` (needs `mysql:8.4` and `debian:stable-slim`). CI runs both service suites on Linux, next to the PostgreSQL one.
 - `scripts/bench-workspaces.sh` is a manual benchmark (not run by CI): five workspaces on a scratch project with PostgreSQL and Valkey (`--mysql` adds MySQL), printing the cold and warm `switch -c` times, the memory of every container (`docker stats`), the growth of the Docker VM's disk and of the volumes, and a MySQL source's downtime, as a table and JSON (`--json FILE`). It needs Docker, `jq` and the images the suites use, pulls nothing, keeps its registry and data in a temporary directory and removes what it created. Run it on an idle engine: other containers add noise to the memory and disk figures.
 - `scripts/smoke-test.sh DEVFLOW [VERSION]` is the quick start CI runs against an installed release (`init`, `switch -c`, `list`, `remove` in a scratch repository); run it on a local build to see what it checks.
+- `tests/docs.rs` checks the documentation: every relative link in a Markdown file must resolve to a file and, when it names one, a heading (GitHub's spelling of it), and so must every `…/blob/main/…` or raw-GitHub link into this repository that the code, scripts and examples carry (the migration guide, the guide for checkouts devflow does not make, the schemas). Move a document or rename a heading and it fails with `file:line: target`; the fix is the link, not the test.
 - The GUI has headless tests (`cargo test --locked -p devflow-gui`, macOS); native visual checks are manual.
 - Ext4 runners cannot share blocks, so CI cannot assert `verified` CoW. Verify CoW on OrbStack or a Linux btrfs/XFS host and report it separately from the mocked and unit checks. Set `DEVFLOW_EXPECT_COW=verified` to make the Docker tests assert it.
 - Use `DEVFLOW_CONFIG_DIR` and `DEVFLOW_DATA_DIR` to isolate tests from your real registry and managed servers.
@@ -86,8 +88,8 @@ Nothing that looks like a credential may be committed or pushed. The [hk](https:
 ### Pull requests
 
 1. CI passes: the secret scan, Conventional Commits, formatting, clippy, tests, the Docker database and container-service tests, the GUI clippy, build and tests on macOS, shellcheck of the scripts, and `cargo audit`.
-2. Update `docs/` or `README.md` when behavior changes, and `CLAUDE.md` or `AGENTS.md` when layout or the automation contract changes.
-3. Add a `CHANGELOG.md` entry under `Unreleased` for user-facing changes.
+2. Update the page of the [guide](docs/guide/README.md) that describes the behavior (and the [README](README.md) only when the tour changes), `AGENTS.md` for a change to the automation contract (the envelope, exit codes, remedies, the flow) and [docs/agents-reference.md](docs/agents-reference.md) for a document shape, a field or a refusal, `docs/ARCHITECTURE.md` for a module, and `CLAUDE.md` when the layout or the working rules change. Keep README (about 12 KB) and `AGENTS.md` (about 5 KB) short: detail goes to the guide and the reference.
+3. Add a `CHANGELOG.md` entry under `## Unreleased`, in the theme it belongs to (create one only when none fits). Describe the feature as it ships; do not add an entry for a fix to something that has not been released.
 
 ## Releases
 

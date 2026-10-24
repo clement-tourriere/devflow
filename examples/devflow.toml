@@ -1,3 +1,4 @@
+#:schema https://raw.githubusercontent.com/clement-tourriere/devflow/main/docs/devflow.schema.json
 # devflow.toml: committed at the repository root. `devflow init` proposes the
 # content from what the repository contains; this file shows the options most
 # projects use.

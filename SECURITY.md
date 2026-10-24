@@ -106,7 +106,7 @@ Redaction guards against accidental disclosure; it is not a secret scanner.
 
 - **devflow 1.0 has no TLS support.** A managed server is published on `127.0.0.1` by default. Binding to another address, or using an external server across machines, sends database traffic unencrypted. Use a private network such as Tailscale or WireGuard, and do not expose the port to the internet.
 - Access to the Docker engine that runs a managed server is superuser access to its database. Do not give sandboxes a Docker socket, context or SSH key for the data host.
-- Sandboxes should receive only their branch URL. See [docs/REMOTE.md](docs/REMOTE.md).
+- Sandboxes should receive only their branch URL. See [docs/guide/remote-data-hosts.md](docs/guide/remote-data-hosts.md).
 
 ## Repository hygiene
 

@@ -220,9 +220,27 @@ impl Service {
         })
     }
 
+    /// The source of the operation is what its caller expected of it
+    /// ([`super::catalog::SourceExpect`]). The coordinator holds the locks of
+    /// everything the operation touches here, and nothing has been captured,
+    /// stopped or created yet: a reset that ran first (it was planned at the
+    /// same moment) has replaced the data, and the operation ends here, having
+    /// copied nothing.
+    pub(super) fn check_expected_source(&self, op: &Op) -> Result<()> {
+        let Some(expect) = &op.expect else {
+            return Ok(());
+        };
+        let Some(SourceRef::Branch { id }) = op.source else {
+            return Ok(());
+        };
+        let branch = self.require_branch(id)?;
+        expect.verify(&branch)
+    }
+
     /// Run the operation's steps.
     pub(super) fn execute(&self, op_id: Uuid) -> Result<()> {
         let op = self.require_op(op_id)?;
+        self.check_expected_source(&op)?;
         match op.kind {
             OpKind::CreateRoot => self.exec_root(&op),
             OpKind::Clone => self.exec_clone(&op),
@@ -993,6 +1011,86 @@ mod tests {
         assert!(parse_copy("result=empty").unwrap().empty);
         assert!(parse_copy("result=refused error=nope").is_none());
         assert!(parse_copy("garbage").is_none());
+    }
+
+    /// A snapshot and a reset planned at the same moment both pass recovery
+    /// before either is journaled; the reset's coordinator runs first and the
+    /// snapshot's then holds the locks of a branch whose data was replaced.
+    /// What the caller saw is journaled with the operation and the coordinator
+    /// refuses before it captures (and, for MySQL, stops) anything.
+    #[test]
+    fn a_snapshot_of_data_that_a_reset_replaced_first_copies_nothing() {
+        use crate::services::catalog::{BranchRecord, SourceExpect, Store};
+        let dir = tempfile::tempdir().unwrap();
+        let mut svc = crate::services::tests::service();
+        svc.store = Store::in_dir(dir.path(), svc.project, "daemon");
+        let (branch, instance) = (Uuid::new_v4(), Uuid::new_v4());
+        svc.store
+            .update(|catalog| {
+                let service = catalog.service_mut(&svc.key, Engine::Valkey)?;
+                service.branches.push(BranchRecord {
+                    owner: Some(instance),
+                    volume: "volume-g1".into(),
+                    generation: 1,
+                    ..BranchRecord::for_test(branch)
+                });
+                Ok(())
+            })
+            .unwrap();
+        let shown = SourceExpect {
+            owner: Some(instance),
+            generation: Some(1),
+            volume: Some("volume-g1".into()),
+        };
+
+        // An expectation the catalog does not meet is refused at planning, and
+        // plans nothing.
+        let wrong = SourceExpect {
+            generation: Some(7),
+            ..shown.clone()
+        };
+        let error = svc
+            .plan_snapshot(branch, "gc-demo", Some(&wrong))
+            .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("was reset since"),
+            "{error:#}"
+        );
+        assert!(svc.records().unwrap().journal.is_empty());
+        assert!(svc.records().unwrap().snapshots.is_empty());
+
+        // Planned against what was shown, and journaled with it.
+        let op_id = svc.plan_snapshot(branch, "gc-demo", Some(&shown)).unwrap();
+        let op = svc.require_op(op_id).unwrap();
+        assert_eq!(op.expect.as_ref(), Some(&shown));
+        assert!(svc.check_expected_source(&op).is_ok());
+
+        // The reset that was planned alongside runs first: same id, same owner,
+        // another volume and generation.
+        svc.update(|service| {
+            let record = service.branch_mut(branch).context("the branch")?;
+            record.generation = 2;
+            record.volume = "volume-g2".into();
+            Ok(())
+        })
+        .unwrap();
+        let error = svc.execute(op_id).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("was reset since"),
+            "{error:#}"
+        );
+        // Nothing of the operation ran: it never left its first step.
+        let op = svc.require_op(op_id).unwrap();
+        assert_eq!(op.step, Step::Planned);
+        assert!(op.source_running.is_none() && op.stop.is_none() && op.helper_id.is_none());
+
+        // The owner is part of it too.
+        let other = SourceExpect {
+            owner: Some(Uuid::new_v4()),
+            generation: None,
+            volume: None,
+        };
+        assert!(other.verify(&svc.require_branch(branch).unwrap()).is_err());
     }
 
     #[test]

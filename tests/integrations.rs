@@ -17,7 +17,26 @@ impl Env {
         let env = Env::bare();
         let out = env.run(&["init", "--yes", "--name", "shop"]);
         assert!(out.status.success(), "{}", describe(&out));
+        env.commit_config();
         env
+    }
+
+    /// Commit `devflow.toml`, as a person does after reviewing what `init`
+    /// wrote: a workspace runs the recipes of its own branch.
+    fn commit_config(&self) {
+        self.git(&self.repo, &["add", "devflow.toml"]);
+        self.git(
+            &self.repo,
+            &[
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.com",
+                "commit",
+                "-qm",
+                "devflow.toml",
+            ],
+        );
     }
 
     /// A repository with one commit and no devflow configuration.
@@ -121,6 +140,7 @@ impl Env {
         let mut current = std::fs::read_to_string(self.config_path()).unwrap();
         current.push_str(text);
         std::fs::write(self.config_path(), current).unwrap();
+        self.commit_config();
     }
 }
 

@@ -10,6 +10,7 @@ use crate::cow::EntryReport;
 use crate::db::{
     BranchInfo, DataSource, RecordStatus, ResolvedSource, ScratchInfo, Server, SnapshotInfo,
 };
+use crate::effective::{ChoiceChange, ProblemKind, RecipesProblem, RecipesReport, RecipesSource};
 use crate::error::{Busy, PartialRemoval, WorkspaceChanged};
 use crate::hooks::{self, HookPhase, HookReport};
 use crate::ledger::{self, Effect};
@@ -35,10 +36,16 @@ mod activate;
 pub mod mise_gate;
 pub(crate) mod removal;
 mod seed;
+mod sqlite;
 
 pub use activate::{
     BranchDrift, EnvFileProblem, Repair, ServiceRun, ServiceState, activate, autostart,
     create_and_activate,
+};
+pub use sqlite::{
+    SqliteDatabase, SqliteReset, sqlite_databases, sqlite_drop, sqlite_forget, sqlite_orphans,
+    sqlite_reconcile, sqlite_recorded, sqlite_reset, sqlite_snapshot, sqlite_snapshot_delete,
+    sqlite_snapshots,
 };
 
 const UNTRUSTED: &str =
@@ -99,6 +106,13 @@ pub struct SetupOptions {
     /// Run the setup hooks without first checking that mise hands them the
     /// workspace's variables (`--skip-mise-check`). Recorded in the receipt.
     pub skip_mise_check: bool,
+    /// Use the default workspace's recipes (hooks, `[env]`, copy list) in a
+    /// workspace whose own `devflow.toml` is missing or unusable
+    /// (`--use-default-recipes`): the choice is recorded in the receipt and holds
+    /// only while the workspace has no valid file of its own. Without it such a
+    /// workspace has no recipes at all and is `needs_attention`. Where the
+    /// workspace's own file is valid it changes nothing (and says so).
+    pub use_default_recipes: bool,
     /// The pitchfork asked, before a new instance identity replaces the
     /// receipt's, whether the old identity's daemons are gone; the one on
     /// `PATH` when `None`.
@@ -133,6 +147,12 @@ pub struct SetupOutcome {
     /// the first time) started and what it tracks.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub branch_start: Option<worktree::BranchOrigin>,
+    /// Who checked the worktree's files out, for a workspace this call
+    /// created: devflow through libgit2, or Git itself when the person chose
+    /// that in `devflow.local.toml` (which authorizes Git's own filters and
+    /// hooks; `devflow trust` does not cover them).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub checkout: Option<worktree::Checkout>,
     pub hooks: Option<HookReport>,
     pub warnings: Vec<String>,
     /// What a person can do about the outcome (approve what the workspace asks
@@ -170,6 +190,15 @@ pub struct SetupOutcome {
     /// Activation only: what `[pitchfork] autostart` did, apart from `status`.
     #[serde(rename = "processes", skip_serializing_if = "Option::is_none")]
     pub autostart: Option<Autostart>,
+    /// Where this workspace's configuration came from for the run: the file of
+    /// its recipes (its own, the main checkout's, or none), the file the shared
+    /// sections were read from, and what changed about the choice to use the
+    /// default workspace's recipes.
+    pub recipes: RecipesReport,
+    /// Activation only: the workspace had been suspended since this time and
+    /// entering it resumed it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resumed_from: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -189,6 +218,10 @@ pub struct WorkspaceStatus {
     /// (a `git clean -fdx`): entering it, or setup, writes it again.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub env_file: Option<EnvFileProblem>,
+    /// Where the workspace's recipes come from (`None` for a workspace whose
+    /// directory is missing).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recipes: Option<RecipesReport>,
 }
 
 impl WorkspaceStatus {
@@ -227,12 +260,20 @@ pub fn remedies_for(
     receipt: Option<&Receipt>,
     busy: bool,
 ) -> Vec<Remedy> {
-    remedies_given(path, receipt, busy, || {
-        matches!(
-            trust::state_at(project, path),
-            Ok(TrustState::Untrusted { .. })
-        )
-    })
+    let project = project.at(path);
+    let recipes = project.recipes();
+    remedies_given(
+        path,
+        receipt,
+        busy,
+        recipes.problem().filter(|_| recipes.is_unavailable()),
+        || {
+            matches!(
+                trust::state_at(&project, path),
+                Ok(TrustState::Untrusted { .. })
+            )
+        },
+    )
 }
 
 /// [`remedies_for`] with the question "is what the workspace asks to run
@@ -241,6 +282,7 @@ fn remedies_given(
     path: &Path,
     receipt: Option<&Receipt>,
     busy: bool,
+    no_recipes: Option<&RecipesProblem>,
     untrusted: impl FnOnce() -> bool,
 ) -> Vec<Remedy> {
     if busy {
@@ -260,7 +302,21 @@ fn remedies_given(
         record.state == PhaseState::Skipped && record.required_skip
     });
     let mut remedies = Vec::new();
-    if awaiting_review && untrusted() {
+    if let Some(problem) = no_recipes {
+        // Nothing is awaiting review: there are no recipes to review. The
+        // choice comes first.
+        remedies.push(Remedy::UseDefaultRecipes {
+            workspace: path.to_path_buf(),
+        });
+        if problem.kind == ProblemKind::NotCommitted {
+            // The start point cannot have the file whatever setup does: the
+            // way on is the main checkout's file (to commit it).
+            remedies.push(Remedy::OpenFile {
+                path: problem.file.clone(),
+            });
+            return remedies;
+        }
+    } else if awaiting_review && untrusted() {
         remedies.push(Remedy::Trust {
             workspace: path.to_path_buf(),
         });
@@ -292,6 +348,31 @@ struct Held {
     process: Option<ProcessLock>,
     /// The container services this run created or recovered a branch for.
     fresh: Vec<String>,
+    /// The project as the workspace runs it for this entry: its effective
+    /// configuration, resolved once and kept (see [`crate::effective`]).
+    project: Project,
+    /// The workspace instance's operation lock, held for as long as the run
+    /// provisions (see [`ledger::try_instance_lock`]).
+    _instance: ledger::InstanceLock,
+}
+
+/// The operation lock of the instance `instance`, which a run that provisions
+/// or removes what the instance's record names holds throughout. It is only
+/// tried: a run that finds it taken is [`Busy`], never a run that waits. It
+/// lives in the common Git directory, not in the worktree's: Git deletes the
+/// latter with the worktree, and a clean-up that finds the worktree gone must
+/// still be able to tell that a setup is creating the data it lists.
+fn operation_lock(
+    project: &Project,
+    workspace: &str,
+    instance: uuid::Uuid,
+) -> Result<ledger::InstanceLock> {
+    ledger::try_instance_lock(&project.git_common_dir, instance)
+        .context(
+            "the workspace's record cannot be written (the lock beside it cannot be taken), so \
+             nothing is provisioned that nothing would name",
+        )?
+        .ok_or_else(|| anyhow::Error::new(Busy::operation(workspace)))
 }
 
 /// [`create`] that keeps the locks it ran under. With `entering` it takes the
@@ -385,13 +466,27 @@ fn create_held(
         .then(|| processes::process_lock(&workspace))
         .transpose()?;
     let lock = lock(&workspace)?;
+    // The recipes this workspace runs are the ones its own branch carries: read
+    // now that its files exist, once, for the whole run.
+    let project = &project.at_choosing(&workspace.path, request.options.use_default_recipes);
     let mut receipt = Receipt::new(project.id(), &workspace.name, Some(code_source));
+    // Before the first write of the receipt (and so of the record): from here
+    // on a clean-up that finds the worktree gone leaves the instance alone.
+    let instance_lock = operation_lock(project, &workspace.name, receipt.instance_id)?;
     receipt.code_source_path = Some(code_source_path);
     receipt.code_source_instance = code_source_instance;
+    let recipes_choice = record_recipes_choice(project, &mut receipt);
     let detail = format!(
-        "created {} ({})",
+        "created {} ({}{})",
         workspace.path.display(),
-        created.origin.describe()
+        created.origin.describe(),
+        // Said whenever Git itself ran, since that is the person's explicit
+        // authorization of Git's own filters and hooks.
+        match created.checkout.backend {
+            crate::config::CheckoutBackend::Git =>
+                format!(", checked out by {}", created.checkout.describe()),
+            crate::config::CheckoutBackend::Libgit2 => String::new(),
+        }
     );
     receipt.set_phase(Phase::Materialize, PhaseState::Done, Some(detail.clone()));
     receipt.save(&workspace.git_dir)?;
@@ -399,9 +494,12 @@ fn create_held(
 
     let mut runner = Runner::new(project, workspace, receipt, &request.options, progress);
     runner.warnings.extend(created.warnings);
+    runner.recipes_choice = recipes_choice;
+    runner.warn_recipes();
     runner.run(&Phase::ALL)?;
-    let mut held = runner.finish_held(lock, process);
+    let mut held = runner.finish_held(lock, process, instance_lock);
     held.outcome.branch_start = Some(created.origin);
+    held.outcome.checkout = Some(created.checkout);
     Ok(held)
 }
 
@@ -589,6 +687,11 @@ fn setup_held(
     if let Some(id) = instance {
         refuse_borrowed_identity(project, workspace, id)?;
     }
+    let main = project;
+    // The recipes this workspace runs (its own branch's, or the choice made
+    // for it) as they are now: what the shortcuts below judge. The run itself
+    // keeps the ones read again under the lock.
+    let project = &main.at_choosing(&workspace.path, options.use_default_recipes);
     let ready = |r: &Option<Receipt>| r.as_ref().is_some_and(|r| r.status() == Status::Ready);
     // A fork is requested explicitly, or by an instance id that is not the
     // receipt's. It comes before every "nothing to do" shortcut.
@@ -598,26 +701,44 @@ fn setup_held(
                 .zip(instance)
                 .is_some_and(|(r, id)| r.instance_id != id)
     };
-    // A derived file that went missing is repaired even when everything else
-    // says there is nothing to do: the shortcuts below leave a workspace alone
-    // only if it needs no repair.
-    let port_ok =
-        || recipes_verdict(project, &workspace.path, options.approval.as_ref()).approved();
-    let repairable = |r: &Option<Receipt>| {
-        r.as_ref()
-            .is_some_and(|r| activate::repair_needed(workspace, r, &project.config, &port_ok))
-    };
     // Read through [`load_receipt`]: a version 1 receipt is migrated in memory
     // and what the configuration invalidates is reopened, so `ready` below is
     // what the next setup would act on.
     let before = load_receipt(project, workspace)?;
-    if if_new && ready(&before) && !forks(&before) && !repairable(&before) {
-        // Skipped, but not before an upgraded workspace has its record: host
-        // integrations run `--if-new` on every new worktree and every start, and
-        // a workspace they never wrote a record for would lose what it owns the
-        // day a host deletes its worktree.
-        backfill_record(workspace)?;
-        return Ok(None);
+    // The gap in which another process can still change the receipt: between
+    // the first look and the locks, whichever way the run goes on from here.
+    let mut between = Some(between);
+    let mut gap = move || {
+        if let Some(between) = between.take() {
+            between();
+        }
+    };
+    // The whole of "there is nothing to do", for the project as the caller
+    // resolved it: `--if-new`, a ready receipt, no identity to replace and no
+    // derived file to repair. It is asked again under the receipt lock.
+    let may_leave = |project: &Project, receipt: &Option<Receipt>| {
+        let port_ok =
+            || recipes_verdict(project, &workspace.path, options.approval.as_ref()).approved();
+        if_new
+            && ready(receipt)
+            && !forks(receipt)
+            && !receipt.as_ref().is_some_and(|receipt| {
+                activate::repair_needed(workspace, receipt, &project.config, &port_ok)
+            })
+    };
+    if may_leave(project, &before) {
+        gap();
+        // Skipped, but not before an upgraded workspace has its record and its
+        // bookkeeping: host integrations run `--if-new` on every new worktree
+        // and every start, and a workspace they never wrote a record for would
+        // lose what it owns the day a host deletes its worktree, and one they
+        // never gave a generation of its hooks would never see them change.
+        // Under the lock the skip is judged again in full: what changed since
+        // the first look (another setup that replaced the identity, a derived
+        // file lost, a receipt gone) means a real setup.
+        if keep_records(main, workspace, &options, &may_leave)? {
+            return Ok(None);
+        }
     }
     // Replacing the identity is an operation on the workspace's daemons: the
     // namespace they run under goes with it. It holds the process lock, taken
@@ -629,21 +750,26 @@ fn setup_held(
     } else {
         None
     };
-    // The gap in which another process can still change the receipt.
-    between();
+    gap();
     // A ready receipt was left alone above; everything else needs this run.
     // Skipping it quietly would let a caller believe the workspace is set up.
     let lock = match acquire(&workspace.git_dir)? {
         Some(lock) => lock,
         None => return Err(busy(&workspace.name)),
     };
+    // The configuration this run keeps, read once the receipt (which holds
+    // the choice of recipes) can no longer change under it. A hook that
+    // rewrites `devflow.toml` changes nothing for the rest of the run.
+    let project = &main.at_choosing(&workspace.path, options.use_default_recipes);
+    let port_ok =
+        || recipes_verdict(project, &workspace.path, options.approval.as_ref()).approved();
     // Another run may have finished while we waited for the lock. A version 1
     // receipt is migrated on disk here, which has no effect beyond the file.
     let mut existing = load_receipt_locked(project, workspace, &lock)?;
     let mut fork = forks(&existing);
-    if if_new && ready(&existing) && !fork && !repairable(&existing) {
-        if let Some(receipt) = &existing {
-            ledger::sync(&workspace.git_dir, receipt)?;
+    if may_leave(project, &existing) {
+        if let Some(receipt) = existing.as_mut() {
+            leave_alone(project, workspace, receipt)?;
         }
         return Ok(None);
     }
@@ -664,7 +790,10 @@ fn setup_held(
         // under both locks.
         existing = load_receipt_locked(project, workspace, &lock)?;
         fork = forks(&existing);
-        if if_new && ready(&existing) && !fork && !repairable(&existing) {
+        if may_leave(project, &existing) {
+            if let Some(receipt) = existing.as_mut() {
+                leave_alone(project, workspace, receipt)?;
+            }
             return Ok(None);
         }
     }
@@ -725,10 +854,22 @@ fn setup_held(
             receipt
         }
     };
+    let recipes_choice = record_recipes_choice(project, &mut receipt);
     // The identity this checkout had before a fork: its port is retired once
     // the replacement receipt is durable (below), never before.
     let replaced = fork.then_some(receipt.instance_id);
     if fork {
+        // A focus on the identity this checkout is giving up ends first: its
+        // port is retired below and can then go to another workspace, which
+        // callbacks must not reach. Not being able to end it stops the fork
+        // before the identity changes.
+        crate::focus::release_checkout(project.id(), receipt.instance_id, &workspace.path)
+            .with_context(|| {
+                format!(
+                    "the focus on '{}' could not be ended before it gets a new identity",
+                    workspace.name
+                )
+            })?;
         fork_receipt(&mut receipt, &project.config, &options, instance);
         // The identity was replaced on purpose, and the fork forgets the data
         // the old one owned: its record goes with it (a copied one would let a
@@ -736,9 +877,17 @@ fn setup_held(
         // retired below, once the replacement receipt is durable.
         let old_instance = replaced.expect("a fork replaces an identity");
         if old_instance != receipt.instance_id {
+            // The old record is another operation's to leave alone while it
+            // runs: a clean-up working on it must finish before it goes.
+            let _old = operation_lock(project, &workspace.name, old_instance)?;
             ledger::Handle::new(&project.git_common_dir, old_instance).forget()?;
         }
     }
+    // Before the first write of the receipt and of the record, and for as long
+    // as this run provisions: a clean-up of a worktree that Git removed meanwhile
+    // (a host deleting it while it is set up) must not settle a branch this run
+    // is about to create as "not there" and delete the record that names it.
+    let instance_lock = operation_lock(project, &workspace.name, receipt.instance_id)?;
     if first_setup {
         progress.notice(&first_setup_notice(project, &workspace, &options));
     }
@@ -777,6 +926,8 @@ fn setup_held(
     }
     let mut runner = Runner::new(project, workspace, receipt, &options, progress);
     runner.warnings.extend(warnings);
+    runner.recipes_choice = recipes_choice;
+    runner.warn_recipes();
     runner.warn_unmapped();
     runner.run(&Phase::ALL)?;
     // devflow's own pitchfork namespace file: the env phase writes it when it
@@ -784,23 +935,86 @@ fn setup_held(
     repair.finish(&mut runner);
     runner.drift = drift;
     runner.first_setup = first_setup;
-    Ok(Some(runner.finish_held(lock, process_lock)))
+    Ok(Some(runner.finish_held(lock, process_lock, instance_lock)))
 }
 
-/// Write the record of a ready workspace that has none (it was set up before
-/// records existed), from its receipt, under the receipt lock, provisioning
-/// nothing. A lock another run holds means that run is writing the receipt and,
-/// with it, the record, so nothing is waited for. A record that cannot be
-/// written or read is an error: nothing may say a workspace is set up while the
-/// ledger cannot name what it owns.
-fn backfill_record(workspace: &Workspace) -> Result<()> {
-    let Some(_lock) = acquire(&workspace.git_dir)? else {
-        return Ok(());
+/// What a run that leaves a ready workspace alone (`setup --if-new`) still
+/// does for it, under the receipt lock: the record of a workspace set up before
+/// records existed (from its receipt, provisioning nothing), and the receipt's
+/// own bookkeeping ([`settle_recipes`], and the generation of the hooks an
+/// earlier receipt adopts when it is read). A lock another run holds means that
+/// run is writing the receipt and, with it, the record, so nothing is waited
+/// for. A record that cannot be written or read is an error: nothing may say a
+/// workspace is set up while the ledger cannot name what it owns.
+///
+/// `false` when `may_leave`, asked again now that the receipt is read under the
+/// lock, no longer holds (the workspace is not ready any more, another setup
+/// replaced the identity that was asked for, a derived file was lost, the
+/// receipt is gone): the run goes on and sets it up.
+fn keep_records(
+    main: &Project,
+    workspace: &Workspace,
+    options: &SetupOptions,
+    may_leave: &dyn Fn(&Project, &Option<Receipt>) -> bool,
+) -> Result<bool> {
+    let Some(lock) = acquire(&workspace.git_dir)? else {
+        return Ok(true);
     };
-    if let Some(receipt) = Receipt::load(&workspace.git_dir)? {
-        ledger::sync(&workspace.git_dir, &receipt)?;
+    let project = main.at_choosing(&workspace.path, options.use_default_recipes);
+    let mut receipt = load_receipt_locked(&project, workspace, &lock)?;
+    if !may_leave(&project, &receipt) {
+        return Ok(false);
     }
-    Ok(())
+    if let Some(receipt) = receipt.as_mut() {
+        leave_alone(&project, workspace, receipt)?;
+    }
+    Ok(true)
+}
+
+/// The bookkeeping of a run that leaves a ready workspace as it is, with the
+/// receipt lock held: [`settle_recipes`] persisted when it changed anything, and
+/// the ledger's record in step with the receipt ([`restore_record`]).
+fn leave_alone(project: &Project, workspace: &Workspace, receipt: &mut Receipt) -> Result<()> {
+    if settle_recipes(project, receipt) {
+        receipt.save(&workspace.git_dir)?;
+    }
+    restore_record(&workspace.git_dir, receipt)
+}
+
+/// [`record_recipes_choice`] for a run with no outcome to say anything in: a
+/// receipt from before recipes were per workspace is marked as written by a
+/// devflow that knows, and a recorded choice of the default workspace's recipes
+/// is cleared once the workspace has a valid file of its own. A receipt whose
+/// branch has no recipes of its own keeps the default's, as before, and is left
+/// as it is: recording that is reported once, by the next run that has an
+/// outcome to carry the report. Returns whether the receipt changed.
+fn settle_recipes(project: &Project, receipt: &mut Receipt) -> bool {
+    let before_per_workspace = !receipt.workspace_recipes;
+    if before_per_workspace
+        && receipt.default_recipes.is_none()
+        && matches!(project.recipes(), RecipesSource::DefaultChosen { .. })
+    {
+        return false;
+    }
+    let before = (receipt.workspace_recipes, receipt.default_recipes.is_some());
+    record_recipes_choice(project, receipt);
+    before != (receipt.workspace_recipes, receipt.default_recipes.is_some())
+}
+
+/// The record of a workspace whose ready receipt is about to be left alone, under
+/// the receipt lock (so no removal is running): written if it has none, and
+/// reconciled with the receipt. A `remove --keep-data` that failed part-way
+/// leaves the workspace in use with a receipt that still names its data as
+/// owned, a record that says `removing` and a list of branches it was asked to
+/// keep; a host's `setup --if-new` is the only thing that touches the
+/// workspace after that, and it used to stop at "ready", so the workspace went
+/// on using branches that a later removal and a clean-up excluded for good.
+/// Setting a workspace up again is changing one's mind about a removal, and
+/// leaving the receipt alone is no different: the removal is over, the data is
+/// owned again.
+fn restore_record(git_dir: &Path, receipt: &Receipt) -> Result<()> {
+    ledger::mark_active(git_dir, receipt.instance_id)?;
+    ledger::sync(git_dir, receipt)
 }
 
 /// What the first setup of the default workspace says before it runs: setup
@@ -890,10 +1104,11 @@ fn switch_hooks(
 /// `dir`: there are none, or the scope is approved as hooks are (see
 /// [`hooks_verdict`]). An unreadable approval file counts as not approved.
 fn recipes_verdict(project: &Project, dir: &Path, approval: Option<&Approval>) -> Verdict {
+    let project = project.at(dir);
     if project.config.env.is_empty() {
         return Verdict::Approved;
     }
-    hooks_verdict(project, dir, approval).unwrap_or(Verdict::NotApproved)
+    hooks_verdict(&project, dir, approval).unwrap_or(Verdict::NotApproved)
 }
 
 /// Whether hooks may run in the workspace at `dir`: `DEVFLOW_TRUST_HOOKS=1`
@@ -902,6 +1117,57 @@ fn recipes_verdict(project: &Project, dir: &Path, approval: Option<&Approval>) -
 /// main checkout), or the caller's approval is of exactly that scope.
 fn hooks_verdict(project: &Project, dir: &Path, approval: Option<&Approval>) -> Result<Verdict> {
     trust::verdict_at(project, dir, approval)
+}
+
+/// The receipt's record of the choice to use the default workspace's recipes,
+/// brought in line with the recipes the run resolved: recorded when they are
+/// the default's by choice, cleared when the workspace's own file is valid
+/// again. Returns what changed.
+///
+/// A receipt written before recipes were per workspace (when every workspace ran
+/// the default workspace's) whose branch has none of its own keeps them, as
+/// before: that is recorded as the choice now, once, and the run says so
+/// ([`ChoiceChange::Migrated`]). It is not a silent borrowing: the receipt names
+/// it, the outcome reports it, and it ends when the branch has a valid file.
+/// Either way the receipt is marked as written by a devflow that knows.
+fn record_recipes_choice(project: &Project, receipt: &mut Receipt) -> Option<ChoiceChange> {
+    let before_per_workspace = !receipt.workspace_recipes;
+    receipt.workspace_recipes = true;
+    match (project.recipes(), receipt.default_recipes.is_some()) {
+        (RecipesSource::DefaultChosen { because, .. }, false) => {
+            receipt.default_recipes = Some(receipt::DefaultRecipes {
+                chosen_at: chrono::Utc::now(),
+                because: if before_per_workspace {
+                    format!(
+                        "set up before recipes were per workspace, when every workspace ran the \
+                         default workspace's ({})",
+                        because.message
+                    )
+                } else {
+                    because.message
+                },
+            });
+            Some(if before_per_workspace {
+                ChoiceChange::Migrated
+            } else {
+                ChoiceChange::Recorded
+            })
+        }
+        (RecipesSource::Main { .. } | RecipesSource::Workspace { .. }, true) => {
+            receipt.default_recipes = None;
+            Some(ChoiceChange::Cleared)
+        }
+        _ => None,
+    }
+}
+
+/// What a required skip says when a workspace has no recipes.
+fn no_recipes_detail(because: &str) -> String {
+    format!(
+        "this workspace has no recipes of its own ({because}), so no hooks, [env] recipes or \
+         copy list apply; commit a valid devflow.toml in it, or use the default workspace's \
+         recipes"
+    )
 }
 
 #[derive(Debug, Clone, Default)]
@@ -941,6 +1207,9 @@ pub struct RemoveOptions {
     /// compared with [`RemoveOptions::expect`] again after it, so what it took
     /// the time to do cannot end with a workspace that came back removed.
     pub before_effects: Option<Gate>,
+    /// The caller holds the instance's operation lock already (`gc` takes it
+    /// before it reads anything): the removal must not try it again.
+    pub holds_instance_lock: bool,
 }
 
 /// A step a removal runs under its locks before the first effect
@@ -1002,6 +1271,10 @@ pub struct RemoveOutcome {
     /// finishes it, and the record is kept until it has.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub still_recorded: Vec<String>,
+    /// The focus pointed at this workspace and was ended with it: no forward
+    /// is left to its port, which may be given to another workspace.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub released_focus: Option<crate::focus::Released>,
     pub warnings: Vec<String>,
 }
 
@@ -1105,6 +1378,9 @@ pub(crate) fn remove_workspace(
     options: RemoveOptions,
     progress: &mut dyn Progress,
 ) -> Result<RemoveOutcome> {
+    // The teardown hooks are the ones this workspace runs (its own branch's),
+    // read once for the whole removal.
+    let project = &project.at_choosing(&workspace.path, false);
     // First of all, before any protection that might read or lock anything: a
     // caller's stale view must never reach a workspace recreated in its place.
     if let Some(expect) = &options.expect {
@@ -1192,6 +1468,38 @@ pub(crate) fn remove_workspace(
     if let Some(expect) = &options.expect {
         check_expected(&workspace, expect, receipt.as_ref().map(|r| r.instance_id))?;
     }
+    // A removal is an operation on the instance's data like a setup: while a
+    // clean-up or another removal holds it, nothing here changes. Not lifted by
+    // `force`.
+    let _instance = match (&receipt, options.holds_instance_lock) {
+        (Some(receipt), false) => {
+            match ledger::try_instance_lock(&project.git_common_dir, receipt.instance_id) {
+                Ok(Some(lock)) => Some(lock),
+                Ok(None) => {
+                    return Err(protected(name, Busy::operation(name).to_string(), false));
+                }
+                // The ledger beside the lock is the one the removal journals
+                // into: where it cannot be written, nothing changes, and force
+                // does not lift that (what the receipt names would be recorded
+                // nowhere once the receipt is gone).
+                Err(e) => {
+                    return Err(protected_with(
+                        name,
+                        format!(
+                            "the workspace's record could not be written or read, and what its \
+                             receipt names would then be recorded nowhere once the receipt is \
+                             gone ({e:#})"
+                        ),
+                        false,
+                        vec![Remedy::Reveal {
+                            path: ledger::path(&project.git_common_dir, receipt.instance_id),
+                        }],
+                    ));
+                }
+            }
+        }
+        _ => None,
+    };
 
     // Daemons of this workspace that are running are stopped before anything
     // is removed (their lifecycle hooks come from the worktree's current
@@ -1369,6 +1677,37 @@ pub(crate) fn remove_workspace(
             .map_err(|error| protected(name, format!("{error:#}"), false))?;
         if let Some(expect) = &options.expect {
             check_expected(&workspace, expect, receipt.as_ref().map(|r| r.instance_id))?;
+        }
+    }
+
+    // The focus on this workspace ends before anything is deleted. The record
+    // says `removing` first, which is what keeps a focus from being published
+    // for it meanwhile (publishing and ending both happen under the focus's
+    // control lock). A forwarder that cannot be seen to stop is a refusal that
+    // force does not lift: the workspace's port goes back to the pool when it
+    // is removed, and a forward that survives would lead to whoever gets it.
+    let mut released_focus = None;
+    if let (Some(ledger), Some(receipt)) = (&ledger, &receipt) {
+        ledger.begin(None).map_err(|error| {
+            protected(
+                name,
+                format!("the workspace's record could not be marked as being removed: {error:#}"),
+                false,
+            )
+        })?;
+        match crate::focus::release_instance(project.id(), receipt.instance_id) {
+            Ok(released) => released_focus = released,
+            Err(error) => {
+                return Err(protected_with(
+                    name,
+                    format!(
+                        "the focus on this workspace could not be ended, and its port must not \
+                         be given to another workspace while something forwards to it: {error:#}"
+                    ),
+                    false,
+                    vec![Remedy::Retry],
+                ));
+            }
         }
     }
 
@@ -1557,9 +1896,9 @@ pub(crate) fn remove_workspace(
         // Nothing but trying again helps; the data is already dropped.
         return Err(partial(format!("{error:#}"), &done, &[], false));
     }
-    // The port it was given goes back (best effort: an entry that stays is
-    // dropped once the directory is seen to be gone).
     if let Some(receipt) = &receipt {
+        // The port it was given goes back (best effort: an entry that stays is
+        // dropped once the directory is seen to be gone).
         crate::ports::release(project.id(), receipt.instance_id, &workspace.path);
     }
     let mut still_recorded = Vec::new();
@@ -1597,6 +1936,7 @@ pub(crate) fn remove_workspace(
         stopped_daemons,
         may_still_run,
         still_recorded,
+        released_focus,
         warnings,
     })
 }
@@ -1714,10 +2054,12 @@ pub fn list(project: &Project) -> Result<Vec<WorkspaceStatus>> {
             if let Some(receipt) = receipt.as_ref().filter(|_| drift.is_some()) {
                 workspace.name = receipt.workspace.clone();
             }
+            let own = project.at(&workspace.path);
             let env_file = receipt
                 .as_ref()
                 .filter(|receipt| !workspace.missing && complete(receipt, Phase::Env))
-                .and_then(|receipt| activate::env_problem(&workspace, receipt, &project.config));
+                .and_then(|receipt| activate::env_problem(&workspace, receipt, &own.config));
+            let recipes = (!workspace.missing).then(|| own.effective().report(None));
             WorkspaceStatus {
                 workspace,
                 receipt,
@@ -1725,6 +2067,7 @@ pub fn list(project: &Project) -> Result<Vec<WorkspaceStatus>> {
                 busy,
                 drift,
                 env_file,
+                recipes,
             }
         })
         .collect())
@@ -1838,6 +2181,22 @@ pub fn env_vars(
             }
         }
     }
+    // Each sqlite service's file in this worktree: its absolute path, and the
+    // `sqlite:` URL of it. Where the worktree is now decides them, not what
+    // the binding recorded when it was made.
+    for (key, section) in project.config.sqlite_services().filter(|_| services) {
+        if receipt
+            .services
+            .get(key)
+            .is_some_and(|b| b.engine == Engine::Sqlite && !b.orphaned)
+        {
+            let file = crate::sqlite::file_in(&workspace.path, section);
+            if let Some(name) = project.config.url_variable(key) {
+                push(name, crate::sqlite::url_of(&file));
+            }
+            push(section.path_env_name(), file.display().to_string());
+        }
+    }
     push("DEVFLOW_PROJECT", project.name().to_string());
     push("DEVFLOW_PROJECT_ROOT", project.root.display().to_string());
     push("DEVFLOW_WORKSPACE", workspace.name.clone());
@@ -1914,6 +2273,8 @@ pub fn workspace_env(
     receipt: &Receipt,
     recipes: bool,
 ) -> WorkspaceEnv {
+    // The recipes this workspace runs.
+    let project = &*project.at(&workspace.path);
     let mut vars = env_vars(project, workspace, receipt);
     let mut env = WorkspaceEnv::default();
     if recipes && !project.config.env.is_empty() {
@@ -2368,6 +2729,9 @@ struct Runner<'a> {
     first_setup: bool,
     /// Remedies for problems a phase met that do not fail it.
     remedies: Vec<Remedy>,
+    /// The choice to use the default workspace's recipes was recorded or
+    /// cleared by this run.
+    recipes_choice: Option<ChoiceChange>,
 }
 
 impl<'a> Runner<'a> {
@@ -2393,6 +2757,51 @@ impl<'a> Runner<'a> {
             repaired: Vec::new(),
             first_setup: false,
             remedies: Vec::new(),
+            recipes_choice: None,
+        }
+    }
+
+    /// Why no recipe of this workspace applies, when none does: its own
+    /// `devflow.toml` is missing or unusable and nobody chose the default
+    /// workspace's. Payload, `[env]` recipes and hooks are required skips then,
+    /// and nothing of the main checkout's recipes runs, is copied or is
+    /// exported.
+    fn no_recipes(&self) -> Option<String> {
+        match self.project.recipes() {
+            RecipesSource::Unavailable { because } => Some(no_recipes_detail(&because.message)),
+            _ => None,
+        }
+    }
+
+    /// What the run should tell about the configuration it works from: the
+    /// shared sections the workspace's own file differs in (never applied), a
+    /// `devflow.local.toml` inside the worktree (ignored), and the choice of
+    /// recipes it recorded or cleared.
+    fn warn_recipes(&mut self) {
+        let effective = self.project.effective();
+        self.warnings.extend(effective.warnings());
+        self.warnings.extend(effective.ignored_local_warning());
+        match self.recipes_choice {
+            Some(ChoiceChange::Recorded) => self.warnings.push(
+                "this workspace has no usable devflow.toml of its own: the default workspace's \
+                 recipes apply to it until it has"
+                    .into(),
+            ),
+            Some(ChoiceChange::Migrated) => self.warnings.push(
+                "this workspace was set up before each workspace read its recipes from its own \
+                 branch, and its branch has none that is usable: it keeps the default \
+                 workspace's recipes, as before, until its branch has its own"
+                    .into(),
+            ),
+            Some(ChoiceChange::Cleared) => self.warnings.push(format!(
+                "this workspace's own {} is valid again: its own recipes apply, and the choice \
+                 to use the default workspace's recipes was cleared",
+                effective
+                    .recipes
+                    .file()
+                    .map_or_else(|| "devflow.toml".into(), |f| f.display().to_string())
+            )),
+            None => {}
         }
     }
 
@@ -2411,13 +2820,21 @@ impl<'a> Runner<'a> {
     }
 
     /// The run's outcome, with the receipt lock it ran under.
-    fn finish_held(self, lock: ReceiptLock, process: Option<ProcessLock>) -> Held {
+    fn finish_held(
+        self,
+        lock: ReceiptLock,
+        process: Option<ProcessLock>,
+        instance: ledger::InstanceLock,
+    ) -> Held {
+        let project = self.project.clone();
         let (outcome, fresh) = self.outcome();
         Held {
             outcome,
             lock,
             process,
             fresh,
+            project,
+            _instance: instance,
         }
     }
 
@@ -2441,6 +2858,7 @@ impl<'a> Runner<'a> {
             receipt: self.receipt,
             payload: self.payload,
             branch_start: None,
+            checkout: None,
             hooks: self.hooks,
             warnings: self.warnings,
             approval_differs: self.differs,
@@ -2450,6 +2868,8 @@ impl<'a> Runner<'a> {
             services_state: Vec::new(),
             switch_hooks: None,
             autostart: None,
+            recipes: self.project.effective().report(self.recipes_choice),
+            resumed_from: None,
         };
         (outcome, self.fresh)
     }
@@ -2508,6 +2928,10 @@ impl<'a> Runner<'a> {
         let Some(source) = source_workspace(self.project, &self.workspace, &self.receipt)? else {
             return Ok(PhaseResult::Skipped("this is the source checkout".into()));
         };
+        // The copy list is a recipe: a workspace without recipes copies nothing.
+        if let Some(why) = self.no_recipes() {
+            return Ok(PhaseResult::SkippedRequired(why));
+        }
         // `[worktree] copy`, then the ignored files `.worktreeinclude` selects
         // (read from the source checkout, else the main one).
         let copy = &self.project.config.worktree.copy;
@@ -2559,6 +2983,7 @@ impl<'a> Runner<'a> {
             let detail = match engine {
                 Engine::Postgres => self.postgres(key)?,
                 Engine::Valkey | Engine::Redis | Engine::Mysql => self.container(key, *engine)?,
+                Engine::Sqlite => self.sqlite(key)?,
             };
             details.push(format!("{key}: {detail}"));
         }
@@ -2892,6 +3317,7 @@ impl<'a> Runner<'a> {
             service: key.to_string(),
             branch_id: id,
             engine: Some(Engine::Postgres),
+            file: None,
         });
         self.receipt.save(&self.workspace.git_dir)?;
         let creds = server.create_branch_with_id(id, &name, resolved, Some(instance))?;
@@ -3011,6 +3437,7 @@ impl<'a> Runner<'a> {
             service: key.to_string(),
             branch_id: id,
             engine: Some(engine),
+            file: None,
         });
         self.receipt.save(&self.workspace.git_dir)?;
         let record = svc.create_branch(NewBranch {
@@ -3311,7 +3738,10 @@ impl<'a> Runner<'a> {
             &self.workspace.path,
             self.options.approval.as_ref(),
         );
-        let trusted = verdict.approved();
+        // A workspace without recipes has none to apply: the file holds what
+        // devflow generates, and the phase stays open until it has some.
+        let no_recipes = self.no_recipes();
+        let trusted = no_recipes.is_none() && verdict.approved();
         // The file about to be replaced may be the only record of what an
         // earlier devflow exported (a receipt from before the history was kept
         // has none): keep its names before anything is overwritten, so a recipe
@@ -3350,6 +3780,9 @@ impl<'a> Runner<'a> {
             .map(crate::env_owner::describe_conflict),
         );
         let vars = env.vars;
+        if let Some(why) = no_recipes {
+            return Ok(PhaseResult::SkippedRequired(why));
+        }
         if !trusted {
             self.differs |= verdict == Verdict::Differs;
             return Ok(PhaseResult::SkippedRequired(
@@ -3375,8 +3808,12 @@ impl<'a> Runner<'a> {
         if self.options.no_hooks {
             return Ok(PhaseResult::SkippedOnRequest(receipt::SKIP_NO_HOOKS.into()));
         }
+        if let Some(why) = self.no_recipes() {
+            return Ok(PhaseResult::SkippedRequired(why));
+        }
         let hooks = &self.project.config.hooks;
         if hooks.setup.is_empty() {
+            self.receipt.stamp_hooks_generation(&self.project.config);
             return Ok(PhaseResult::Done(Some("no setup hooks".into())));
         }
         let verdict = hooks_verdict(
@@ -3425,10 +3862,13 @@ impl<'a> Runner<'a> {
         self.receipt.hooks_digest = Some(trust::digest_at(self.project, &self.workspace.path));
         let result = match report.failure() {
             Some(failure) => PhaseResult::Failed(failure),
-            None => PhaseResult::Done(Some(crate::text::counted(
-                report.runs.len() as u64,
-                "command",
-            ))),
+            None => {
+                self.receipt.stamp_hooks_generation(&self.project.config);
+                PhaseResult::Done(Some(crate::text::counted(
+                    report.runs.len() as u64,
+                    "command",
+                )))
+            }
         };
         self.hooks = Some(report);
         Ok(result)
@@ -3438,6 +3878,11 @@ impl<'a> Runner<'a> {
 /// Give the default workspace an empty root branch (and env file) so other
 /// workspaces can clone it. Returns the branch's database name.
 fn init_default(project: &Project, default: &Workspace) -> Result<String> {
+    // The default workspace's own configuration: a caller that is setting up
+    // another workspace hands the project over as that workspace runs it, and
+    // what is recorded as applied here (the environment's generation) must be
+    // the main checkout's.
+    let project = &*project.at(&default.path);
     let lock = acquire(&default.git_dir)?.ok_or_else(|| busy(&default.name))?;
     let mut receipt = match load_receipt_locked(project, default, &lock)? {
         Some(receipt) => receipt,
@@ -3943,6 +4388,7 @@ fn fork_receipt(
     receipt.pending_app_port = None;
     receipt.env_generation = None;
     receipt.hooks_digest = None;
+    receipt.hooks_generation = None;
     receipt.mise_check_skipped_at = None;
     // The copy's daemons ran under the namespace of the instance it came from.
     receipt.processes = None;
@@ -3959,11 +4405,13 @@ fn fork_receipt(
 /// The receipt of `workspace`, refusing one that belongs to another project.
 /// A version 1 file is migrated in memory; see [`load_receipt_locked`].
 fn load_receipt(project: &Project, workspace: &Workspace) -> Result<Option<Receipt>> {
+    // Judged against the recipes this workspace runs (see [`Project::at`]).
+    let project = project.at(&workspace.path);
     let Some(receipt) = Receipt::load_for(&workspace.git_dir, &project.config)? else {
         return Ok(None);
     };
-    let mut receipt = check_project(project, workspace, receipt)?;
-    reopen_invalidated(project, &mut receipt);
+    let mut receipt = check_project(&project, workspace, receipt)?;
+    reopen_invalidated(&project, &mut receipt);
     Ok(Some(receipt))
 }
 
@@ -3974,6 +4422,15 @@ fn load_receipt(project: &Project, workspace: &Workspace) -> Result<Option<Recei
 /// with a connection that leads nowhere. Returns whether anything changed.
 fn reopen_invalidated(project: &Project, receipt: &mut Receipt) -> bool {
     let mut changed = receipt.reopen(&project.config);
+    // Before recipes were per workspace every workspace ran the default
+    // workspace's setup hooks. A receipt from then whose branch has other ones
+    // has not run them: they are open (and not recorded as run).
+    changed |= receipt.reopen_hooks_that_never_ran(&project.config, project.main_config());
+    // A workspace whose own file cannot supply recipes, and for which nobody
+    // chose the default's, runs none: what depended on them is open again.
+    if let RecipesSource::Unavailable { because } = project.recipes() {
+        changed |= receipt.reopen_without_recipes(&no_recipes_detail(&because.message));
+    }
     let lost = services::workspace::lost_bindings(project, receipt);
     changed |= receipt.reopen_lost_branches(&lost);
     changed
@@ -3987,6 +4444,11 @@ fn load_receipt_locked(
     workspace: &Workspace,
     lock: &ReceiptLock,
 ) -> Result<Option<Receipt>> {
+    // Judged against the recipes this workspace runs, as the unlocked loader
+    // does: a caller that holds the project of the main checkout (a reset, a
+    // service reset) must not find a branch with other hooks or `[env]`
+    // drifted, and record that.
+    let project = &*project.at(&workspace.path);
     // Refuse another project's receipt before rewriting anything.
     if let Some(stored) = Receipt::load(&workspace.git_dir)? {
         check_project(project, workspace, stored)?;
@@ -3995,7 +4457,15 @@ fn load_receipt_locked(
     else {
         return Ok(None);
     };
-    if reopen_invalidated(project, &mut receipt) {
+    // What the configuration invalidates is reopened first, hooks that never ran
+    // included. A receipt from before the generation of the hooks was recorded
+    // then adopts the current one for hooks that did run (nothing says they
+    // changed); that is a write, not a reopening. Only where the workspace has
+    // recipes to take it from.
+    let mut changed = reopen_invalidated(project, &mut receipt);
+    changed |= !project.recipes().is_unavailable()
+        && receipt.adopt_hooks_generation(&project.config, project.main_config());
+    if changed {
         receipt.save(&workspace.git_dir)?;
     }
     Ok(Some(receipt))
@@ -4083,8 +4553,16 @@ fn run_hooks(
     phase: HookPhase,
     progress: &mut dyn Progress,
 ) -> Result<HookReport> {
-    // Hooks only run for an approved scope, which includes the recipes.
+    // Hooks only run for an approved scope, which includes the recipes: the
+    // ones this workspace runs.
+    let project = &*project.at(&workspace.path);
     let env = workspace_env(project, workspace, receipt, true);
+    // The logs go below the Git directory only while Git still has it: the
+    // guard creates `devflow/logs` one level at a time below it, and the hook
+    // runner creates nothing but the last level itself, so a worktree Git
+    // removes between the two fails the run instead of being brought back.
+    crate::receipt::logs_dir_in_existing(&workspace.git_dir)?;
+    after_log_guard();
     hooks::run(
         phase,
         &project.config.hooks.commands(phase)?,
@@ -4094,6 +4572,23 @@ fn run_hooks(
         &Receipt::logs_dir(&workspace.git_dir),
         &mut |line| progress.output(line),
     )
+}
+
+// Test seam: runs between the guard that creates the log directory and the
+// hook runner, where a host can remove the worktree.
+#[cfg(test)]
+thread_local! {
+    static AFTER_LOG_GUARD: std::cell::RefCell<Option<Box<dyn Fn()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+fn after_log_guard() {
+    #[cfg(test)]
+    AFTER_LOG_GUARD.with(|hook| {
+        if let Some(hook) = &*hook.borrow() {
+            hook();
+        }
+    });
 }
 
 fn canonical(path: &Path) -> PathBuf {
@@ -4125,6 +4620,44 @@ fn validate_options(options: &SetupOptions) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_default_workspace_is_initialized_with_its_own_configuration_not_the_childs() {
+        use crate::worktree::testutil;
+        let id = uuid::Uuid::new_v4();
+        let config = |mode: &str| {
+            format!("[project]\nname = \"shop\"\nid = \"{id}\"\n\n[env]\nMODE = \"{mode}\"\n")
+        };
+        let t = testutil::repo(Some(&config("main")));
+        trust::approve(&t.project).unwrap();
+        let child = worktree::create(&t.project, "child", None).unwrap();
+        std::fs::write(child.path.join("devflow.toml"), config("branch")).unwrap();
+        let default = worktree::list(&t.project).unwrap().remove(0);
+
+        // Another workspace is being set up: its project is handed over as that
+        // workspace runs it, and main is initialized on the way.
+        let childs = t.project.at_choosing(&child.path, false);
+        assert_ne!(
+            childs.config.env_generation(),
+            t.project.config.env_generation(),
+            "the two configurations differ"
+        );
+        // (There is no database to give: the run ends there, after the
+        // environment was written and its generation recorded.)
+        assert!(init_default(&childs, &default).is_err());
+        let receipt = Receipt::load(&default.git_dir).unwrap().unwrap();
+        assert_eq!(
+            receipt.env_generation.as_deref(),
+            Some(t.project.config.env_generation().as_str()),
+            "main's file was written with main's recipes and stamped with main's generation"
+        );
+        let written = crate::env_file::read(&default.path).unwrap();
+        assert!(written.contains(&("MODE".to_string(), "main".to_string())));
+        // A later change of main to the child's value is therefore seen.
+        let mut changed = t.project.config.clone();
+        changed.env.vars.insert("MODE".into(), "branch".into());
+        assert!(receipt.drift(&changed).env);
+    }
 
     #[test]
     fn an_endpoint_refresh_never_restores_a_receipt_rewritten_meanwhile() {
@@ -4525,6 +5058,7 @@ mod tests {
             service: "db".into(),
             branch_id: uuid::Uuid::new_v4(),
             engine: Some(Engine::Postgres),
+            file: None,
         });
         let mut config = crate::Config::default();
         config.set_postgres("db", Default::default());
@@ -4598,6 +5132,7 @@ mod tests {
             service: service.into(),
             branch_id: uuid::Uuid::new_v4(),
             engine,
+            file: None,
         };
         receipt.creating = Some(pending.clone());
         (receipt, pending)
@@ -4712,6 +5247,7 @@ mod tests {
             service: "db".into(),
             branch_id: branch,
             engine: None,
+            file: None,
         });
         assert_eq!(recoverable(&receipt, "db"), Some(branch));
         // The service was renamed: the new key has no intent of its own.
@@ -4747,11 +5283,11 @@ mod tests {
         };
         // Not set up at all: set it up.
         assert_eq!(
-            remedies_given(path, None, false, || false),
+            remedies_given(path, None, false, None, || false),
             std::slice::from_ref(&setup)
         );
         // A setup run holds it: nothing to do but wait.
-        assert!(remedies_given(path, None, true, || true).is_empty());
+        assert!(remedies_given(path, None, true, None, || true).is_empty());
 
         let mut receipt = Receipt::new(uuid::Uuid::new_v4(), "feature", None);
         for phase in [Phase::Materialize, Phase::Payload, Phase::Services] {
@@ -4761,24 +5297,76 @@ mod tests {
         receipt.skip_required(Phase::Hooks, "any words at all".into());
         // Hooks waiting for approval that has not been given: review first.
         assert_eq!(
-            remedies_given(path, Some(&receipt), false, || true),
+            remedies_given(path, Some(&receipt), false, None, || true),
             [trust, setup.clone()]
         );
         // The approval is on record: only setup has to run again.
         assert_eq!(
-            remedies_given(path, Some(&receipt), false, || false),
+            remedies_given(path, Some(&receipt), false, None, || false),
             std::slice::from_ref(&setup)
         );
         // A failed phase is not about approval, and the question is not asked.
         let mut failed = Receipt::new(uuid::Uuid::new_v4(), "feature", None);
         failed.set_phase(Phase::Materialize, PhaseState::Failed, Some("boom".into()));
         assert_eq!(
-            remedies_given(path, Some(&failed), false, || panic!("not asked")),
+            remedies_given(path, Some(&failed), false, None, || panic!("not asked")),
             [setup]
         );
         // Ready: nothing to fix.
         receipt.set_phase(Phase::Hooks, PhaseState::Done, None);
-        assert!(remedies_given(path, Some(&receipt), false, || true).is_empty());
+        assert!(remedies_given(path, Some(&receipt), false, None, || true).is_empty());
+
+        // No recipes of its own and none chosen: the choice comes first, then
+        // setup again (for a valid file committed since); there is nothing to
+        // review, and the question about approval is not asked.
+        let mut without = Receipt::new(uuid::Uuid::new_v4(), "feature", None);
+        for phase in [Phase::Materialize, Phase::Services] {
+            without.set_phase(phase, PhaseState::Done, None);
+        }
+        for phase in [Phase::Payload, Phase::Env, Phase::Hooks] {
+            without.skip_required(phase, "no recipes".into());
+        }
+        let missing = RecipesProblem {
+            kind: ProblemKind::Missing,
+            file: path.join("devflow.toml"),
+            message: "devflow.toml does not exist".into(),
+        };
+        assert_eq!(
+            remedies_given(path, Some(&without), false, Some(&missing), || {
+                panic!("not asked")
+            }),
+            [
+                Remedy::UseDefaultRecipes {
+                    workspace: path.to_path_buf()
+                },
+                Remedy::Setup {
+                    workspace: path.to_path_buf()
+                }
+            ]
+        );
+        // The start point cannot have the file when the main checkout's is not
+        // committed: the choice, then that file, and no "set up again".
+        let main_file = PathBuf::from("/work/main/devflow.toml");
+        let uncommitted = RecipesProblem {
+            kind: ProblemKind::NotCommitted,
+            file: main_file.clone(),
+            message: "its start point has no devflow.toml".into(),
+        };
+        assert_eq!(
+            remedies_given(path, Some(&without), false, Some(&uncommitted), || {
+                panic!("not asked")
+            }),
+            [
+                Remedy::UseDefaultRecipes {
+                    workspace: path.to_path_buf()
+                },
+                Remedy::OpenFile { path: main_file }
+            ]
+        );
+        assert!(
+            remedies_given(path, Some(&without), true, Some(&missing), || true).is_empty(),
+            "a run that holds it is waited for"
+        );
     }
 
     #[test]
@@ -4935,12 +5523,12 @@ mod tests {
              [services.cache]\nengine = \"valkey\"\n",
         )
         .unwrap();
-        let project = Project {
-            root: dir.join("shop"),
-            git_common_dir: dir.join("shop/.git"),
-            config_path: dir.join("shop/devflow.toml"),
+        let project = Project::new(
+            dir.join("shop"),
+            dir.join("shop/.git"),
             config,
-        };
+            dir.join("shop/devflow.toml"),
+        );
         let git_dir = dir.join("git");
         std::fs::create_dir_all(&git_dir).unwrap();
         let workspace = Workspace {
@@ -5228,6 +5816,49 @@ mod tests {
         std::fs::remove_file(services::catalog::Store::path_for(t.project.id()).unwrap()).unwrap();
         let seen = load_receipt(&t.project, &ws).unwrap().unwrap();
         assert_eq!(seen.status(), Status::Ready);
+    }
+
+    /// Git removes the worktree's administrative directory after the hook
+    /// runner's guard created the log directory and before the runner did:
+    /// the run fails, and nothing brings the directory back.
+    #[test]
+    fn hooks_never_bring_back_a_git_directory_removed_while_they_start() {
+        let (t, ws, _) = bound_to_cache_with(r#""echo run >> .devflow/runs""#, false);
+        trust::approve(&t.project).unwrap();
+        let mut receipt = Receipt::load(&ws.git_dir).unwrap().unwrap();
+        receipt.skip_deliberate(Phase::Services, receipt::SKIP_NO_DB.into());
+        receipt.set_phase(Phase::Env, PhaseState::Pending, None);
+        receipt.set_phase(Phase::Hooks, PhaseState::Pending, None);
+        receipt.save(&ws.git_dir).unwrap();
+
+        let git_dir = ws.git_dir.clone();
+        AFTER_LOG_GUARD.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                std::fs::remove_dir_all(&git_dir).unwrap();
+            }));
+        });
+        let result = setup(
+            &t.project,
+            &ws,
+            SetupOptions::default(),
+            false,
+            false,
+            &mut NoProgress,
+        );
+        AFTER_LOG_GUARD.with(|hook| *hook.borrow_mut() = None);
+
+        assert!(
+            !ws.git_dir.exists(),
+            "the administrative directory stays removed"
+        );
+        assert!(
+            !ws.path.join(".devflow/runs").exists(),
+            "the hook did not run"
+        );
+        match result {
+            Err(error) => assert!(format!("{error:#}").contains("is gone"), "{error:#}"),
+            Ok(outcome) => assert_ne!(outcome.unwrap().status, Status::Ready),
+        }
     }
 
     #[test]

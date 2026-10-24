@@ -6,7 +6,9 @@ use super::output::{self, Palette, note, say};
 use super::{Ctx, ProjectInfo};
 use anyhow::Result;
 use clap::Args;
-use devflow_core::gc::{self, Branch, Class, Entry, Inventory, Presence, RemoveRequest, Target};
+use devflow_core::gc::{
+    self, Branch, Cause, Class, Entry, Inventory, Presence, RebindRequest, RemoveRequest, Target,
+};
 use devflow_core::ids::IdRef;
 use devflow_core::redact;
 use devflow_core::remedy::Remedy;
@@ -14,12 +16,18 @@ use serde_json::json;
 use std::process::ExitCode;
 
 #[derive(Args)]
+#[command(group = clap::ArgGroup::new("act").args(["remove", "rebind"]))]
 pub struct GcArgs {
     /// Remove these workspaces (the ids shown, or at least 8 characters of one)
     #[arg(long, value_name = "ID", num_args = 1..)]
     pub remove: Vec<String>,
-    /// Remove without asking; the selection stays exactly what --remove names
-    #[arg(short = 'y', long, requires = "remove")]
+    /// Confirm that the records of these workspaces belong to this repository
+    /// (written for a copy of it, a restored backup, or a move nothing proves),
+    /// so that they can be cleaned up; nothing is removed by it
+    #[arg(long, value_name = "ID", num_args = 1..)]
+    pub rebind: Vec<String>,
+    /// Act without asking; the selection stays exactly what --remove or --rebind names
+    #[arg(short = 'y', long, requires = "act")]
     pub yes: bool,
     /// Snapshot each data branch first (named gc-WORKSPACE-DATE)
     #[arg(long, requires = "remove")]
@@ -36,7 +44,7 @@ pub struct GcArgs {
 pub fn run(ctx: &Ctx, args: GcArgs) -> Result<ExitCode> {
     let project = ctx.project()?;
     let inventory = gc::inventory(&project, &gc::Options::default())?;
-    if args.remove.is_empty() {
+    if args.remove.is_empty() && args.rebind.is_empty() {
         if ctx.json {
             let body = json!({ "project": ProjectInfo::of(&project), "inventory": inventory });
             output::emit(ctx, "gc", &body)?;
@@ -44,6 +52,10 @@ pub fn run(ctx: &Ctx, args: GcArgs) -> Result<ExitCode> {
             print_inventory(&inventory, args.all);
         }
         return Ok(ExitCode::SUCCESS);
+    }
+
+    if !args.rebind.is_empty() {
+        return rebind_records(ctx, &project, &inventory, &args);
     }
 
     // The selection: exactly the ids named, resolved against what is shown.
@@ -81,6 +93,11 @@ pub fn run(ctx: &Ctx, args: GcArgs) -> Result<ExitCode> {
                         .unwrap_or("it cannot be removed")
                 )
             ));
+            for remedy in &entry.remedies {
+                if let Some(hint) = remedy_hint(remedy) {
+                    note(format!("  hint: {}", redact::text(&hint)));
+                }
+            }
         }
     }
     let confirmed = if removable.is_empty() {
@@ -123,6 +140,7 @@ pub fn run(ctx: &Ctx, args: GcArgs) -> Result<ExitCode> {
                     "instance": e.instance,
                     "workspace": e.workspace,
                     "reason": e.not_removable,
+                    "remedies": devflow_core::remedy::describe(&e.remedies),
                 }))
                 .collect::<Vec<_>>(),
         });
@@ -179,6 +197,9 @@ pub fn run(ctx: &Ctx, args: GcArgs) -> Result<ExitCode> {
                     }
                 ));
             }
+            if let Some(released) = &removed.released_focus {
+                say(format!("  {}", released.describe()));
+            }
             if !removed.still_recorded.is_empty() {
                 note(format!(
                     "  kept on record for a later clean-up: {}",
@@ -211,6 +232,134 @@ pub fn run(ctx: &Ctx, args: GcArgs) -> Result<ExitCode> {
     } else {
         ExitCode::SUCCESS
     })
+}
+
+/// `gc --rebind`: the person confirms that records written for another
+/// repository directory belong to this one. Nothing is removed.
+fn rebind_records(
+    ctx: &Ctx,
+    project: &devflow_core::project::Project,
+    inventory: &Inventory,
+    args: &GcArgs,
+) -> Result<ExitCode> {
+    let mut chosen: Vec<&Entry> = Vec::new();
+    for typed in &args.rebind {
+        let id: IdRef = typed.parse()?;
+        let instance = inventory.resolve(&id)?;
+        let entry = inventory
+            .entry(instance)
+            .expect("an id resolved from the inventory names an entry");
+        if !chosen.iter().any(|c| c.instance == entry.instance) {
+            chosen.push(entry);
+        }
+    }
+    let (bindable, refused): (Vec<&Entry>, Vec<&Entry>) = chosen
+        .iter()
+        .copied()
+        .partition(|e| e.rebindable() && e.target().is_some());
+    if !ctx.json {
+        if !args.yes {
+            print_inventory(inventory, args.all);
+        }
+        for entry in &refused {
+            note(format!(
+                "! not binding {} ({}): its record is not waiting to be bound to this repository",
+                entry.workspace,
+                entry.short_id().unwrap_or_default(),
+            ));
+        }
+    }
+    let confirmed = if bindable.is_empty() {
+        false
+    } else if args.yes {
+        true
+    } else if ctx.interactive() {
+        confirm(&rebind_question(&bindable))?
+    } else {
+        false
+    };
+    let outcome = if confirmed {
+        let request = RebindRequest {
+            targets: bindable.iter().filter_map(|e| e.target()).collect(),
+        };
+        gc::rebind(project, &request, &mut |line| {
+            if !ctx.json {
+                note(line)
+            }
+        })?
+    } else {
+        gc::RebindOutcome::default()
+    };
+    let kept_back = !refused.is_empty() || !outcome.skipped.is_empty();
+    if ctx.json {
+        let mut body = json!({
+            "project": ProjectInfo::of(project),
+            "inventory": inventory,
+            "confirmed": confirmed,
+            "rebound": outcome.rebound,
+            "skipped": outcome.skipped,
+            "not_bindable": refused
+                .iter()
+                .map(|e| json!({ "instance": e.instance, "workspace": e.workspace }))
+                .collect::<Vec<_>>(),
+        });
+        if kept_back {
+            body["error"] = serde_json::Value::String(
+                "some records were not bound (see skipped and not_bindable)".to_string(),
+            );
+        }
+        output::emit(ctx, "gc", &body)?;
+    } else {
+        let palette = Palette::stdout();
+        for rebound in &outcome.rebound {
+            say(format!(
+                "{} Bound the record of {} to this repository ({})",
+                palette.green("✓"),
+                rebound.workspace,
+                rebound.class.label()
+            ));
+        }
+        for skipped in &outcome.skipped {
+            say(format!(
+                "{} kept {}: {}",
+                palette.yellow("!"),
+                skipped.workspace.as_deref().unwrap_or("(unknown)"),
+                redact::text(&skipped.reason)
+            ));
+        }
+        if !confirmed && !bindable.is_empty() {
+            note("hint: pass --yes to bind them without being asked");
+        }
+        if !outcome.rebound.is_empty() {
+            note("hint: they can be cleaned up like any other record now (`devflow gc`)");
+        }
+    }
+    Ok(if kept_back {
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
+    })
+}
+
+/// The question: whose record it is, in words.
+fn rebind_question(entries: &[&Entry]) -> String {
+    let written_for = |entry: &Entry| match &entry.cause {
+        Some(Cause::OtherCheckout { common_dir }) => common_dir.display().to_string(),
+        _ => "another repository".to_string(),
+    };
+    let what = match entries {
+        [one] => format!(
+            "the record of workspace {} (written for {})",
+            one.workspace,
+            written_for(one)
+        ),
+        many => format!("{} records", many.len()),
+    };
+    format!(
+        "Bind {what} to this repository? It may then be cleaned up, which drops the data it names; \
+         bind it only if it is yours and the repository it was written for no longer uses that \
+         data. Binding removes nothing."
+    )
 }
 
 /// The question: what goes, in words.

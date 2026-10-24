@@ -5,6 +5,7 @@ use crate::diag::{Seg, key_label};
 use crate::error::{ConfigShape, NotInitialized, ShapeKind};
 use crate::hooks::{HookCommand, HookPhase};
 use anyhow::{Context, Result, bail};
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -25,7 +26,7 @@ const LEGACY_FILES: [&str; 4] = [
 pub const MIGRATION_GUIDE: &str =
     "https://github.com/clement-tourriere/devflow/blob/main/docs/MIGRATING.md";
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
     pub project: ProjectSection,
@@ -56,7 +57,7 @@ pub struct Config {
 ///
 /// Nothing here decides what a workspace holds, so it is part of no generation
 /// and of no approval: it only changes when the post-checkout hook returns.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
 #[serde(deny_unknown_fields, default)]
 pub struct IntegrationsSection {
     /// What the post-checkout hook does after `git worktree add`: set the
@@ -72,7 +73,7 @@ impl IntegrationsSection {
 }
 
 /// When the post-checkout hook's setup runs relative to Git.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum GitHookMode {
     /// Git waits for the whole setup (4.3 s for a 4 s hook): the worktree is
@@ -97,7 +98,7 @@ pub enum GitHookMode {
 /// The section decides where the data of a workspace comes from when it is
 /// created or adopted. A data source is immutable once chosen, so it is part
 /// of no generation: changing it reopens no workspace that has its data.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
 #[serde(deny_unknown_fields, default)]
 pub struct DataSection {
     /// `snapshot:NAME` (or `snapshot:NAME@vN`): the snapshot each service
@@ -118,7 +119,7 @@ pub struct DataSection {
 
 /// What `[data] noninteractive_fallback` allows a service without the seed
 /// snapshot to start from.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum SeedFallback {
     /// An empty database (an empty cache, an initialized MySQL).
@@ -177,7 +178,7 @@ impl DataSection {
 }
 
 /// `[pitchfork]`: devflow's part in starting a workspace's daemons.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
 #[serde(deny_unknown_fields, default)]
 pub struct PitchforkSection {
     /// Start the workspace's daemons once it is `ready` after `setup` and
@@ -197,7 +198,7 @@ impl PitchforkSection {
 /// Longest service key.
 pub const MAX_KEY_LEN: usize = 31;
 /// Engines this build understands, for error messages.
-const SUPPORTED_ENGINES: &str = "postgres, valkey, redis, mysql";
+const SUPPORTED_ENGINES: &str = "postgres, valkey, redis, mysql, sqlite";
 
 /// How long `on_busy_source = "wait"` waits when `busy_wait` is not set.
 pub const DEFAULT_BUSY_WAIT: Duration = Duration::from_secs(30);
@@ -275,14 +276,17 @@ pub enum Engine {
     Valkey,
     Redis,
     Mysql,
+    /// A database that is a file in the workspace (see [`SqliteSection`]).
+    Sqlite,
 }
 
 impl Engine {
-    pub const ALL: [Engine; 4] = [
+    pub const ALL: [Engine; 5] = [
         Engine::Postgres,
         Engine::Valkey,
         Engine::Redis,
         Engine::Mysql,
+        Engine::Sqlite,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -291,6 +295,7 @@ impl Engine {
             Engine::Valkey => "valkey",
             Engine::Redis => "redis",
             Engine::Mysql => "mysql",
+            Engine::Sqlite => "sqlite",
         }
     }
 
@@ -301,7 +306,14 @@ impl Engine {
     /// A managed container engine devflow branches itself (`valkey`,
     /// `redis`, `mysql`), as opposed to the shared PostgreSQL server.
     pub fn is_container(self) -> bool {
-        !matches!(self, Engine::Postgres)
+        matches!(self, Engine::Valkey | Engine::Redis | Engine::Mysql)
+    }
+
+    /// A database that is a file inside the workspace (`sqlite`): nothing
+    /// runs, there is no server and no catalog of branches, and removing the
+    /// worktree removes it.
+    pub fn is_file(self) -> bool {
+        matches!(self, Engine::Sqlite)
     }
 
     /// The image a service of this engine runs when `image` is not set.
@@ -311,6 +323,7 @@ impl Engine {
             Engine::Valkey => Some(VALKEY_IMAGE),
             Engine::Redis => Some(REDIS_IMAGE),
             Engine::Mysql => Some(MYSQL_IMAGE),
+            Engine::Sqlite => None,
         }
     }
 }
@@ -325,13 +338,14 @@ impl std::fmt::Display for Engine {
 ///
 /// Internally tagged: `engine = "postgres"` plus the engine's own keys, which
 /// stay strict (`deny_unknown_fields` on the section).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, JsonSchema)]
 #[serde(tag = "engine", rename_all = "snake_case")]
 pub enum ServiceConfig {
     Postgres(PostgresSection),
     Valkey(ContainerSection),
     Redis(ContainerSection),
     Mysql(ContainerSection),
+    Sqlite(SqliteSection),
 }
 
 impl ServiceConfig {
@@ -341,6 +355,7 @@ impl ServiceConfig {
             ServiceConfig::Valkey(_) => Engine::Valkey,
             ServiceConfig::Redis(_) => Engine::Redis,
             ServiceConfig::Mysql(_) => Engine::Mysql,
+            ServiceConfig::Sqlite(_) => Engine::Sqlite,
         }
     }
 
@@ -364,7 +379,15 @@ impl ServiceConfig {
             ServiceConfig::Valkey(section)
             | ServiceConfig::Redis(section)
             | ServiceConfig::Mysql(section) => Some(section),
-            ServiceConfig::Postgres(_) => None,
+            ServiceConfig::Postgres(_) | ServiceConfig::Sqlite(_) => None,
+        }
+    }
+
+    /// The section of a `sqlite` service.
+    pub fn as_sqlite(&self) -> Option<&SqliteSection> {
+        match self {
+            ServiceConfig::Sqlite(section) => Some(section),
+            _ => None,
         }
     }
 
@@ -388,6 +411,10 @@ impl ServiceConfig {
                 pg.busy_wait = None;
                 pg.wal_log_below = None;
             }
+            ServiceConfig::Sqlite(sqlite) => {
+                // How long a clone waits for a writer, never what a binding holds.
+                sqlite.busy_wait = None;
+            }
             ServiceConfig::Valkey(_) | ServiceConfig::Redis(_) | ServiceConfig::Mysql(_) => {}
         }
         // Serializing plain data to JSON cannot fail.
@@ -406,6 +433,37 @@ pub fn valid_service_key(key: &str) -> bool {
     chars.next().is_some_and(|c| c.is_ascii_lowercase())
         && key.len() <= MAX_KEY_LEN
         && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-')
+}
+
+/// A character as a case-insensitive file system sees it: APFS and NTFS fold
+/// case by Unicode's simple case folding, which also maps a few non-ASCII
+/// letters onto ASCII ones (`ſ` onto `s`, the Kelvin sign onto `k`).
+fn folded(c: char) -> char {
+    match c {
+        '\u{017f}' => 's',
+        '\u{212a}' => 'k',
+        c => c.to_lowercase().next().unwrap_or(c),
+    }
+}
+
+fn fold(name: &str) -> String {
+    name.chars().map(folded).collect()
+}
+
+/// Whether `name` is one of the files SQLite keeps beside a database
+/// (`-wal`, `-shm`, `-journal`) on a file system that ignores case: such a
+/// name is another file's log or index, never a database of its own.
+pub fn names_a_sqlite_sidecar(name: &str) -> bool {
+    let name = fold(name);
+    ["-wal", "-shm", "-journal"]
+        .iter()
+        .any(|suffix| name.ends_with(suffix))
+}
+
+/// Whether `name` is `.git` or `.devflow` on a file system that ignores case.
+pub fn names_a_reserved_directory(name: &str) -> bool {
+    let name = fold(name);
+    name == ".git" || name == ".devflow"
 }
 
 /// Longest scratch database name.
@@ -434,7 +492,7 @@ pub fn extra_database_env_name(name: &str) -> String {
     format!("{}_DATABASE_URL", name.to_ascii_uppercase())
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ProjectSection {
     pub name: String,
@@ -442,7 +500,7 @@ pub struct ProjectSection {
     pub id: uuid::Uuid,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, JsonSchema)]
 #[serde(deny_unknown_fields, default)]
 pub struct WorktreeSection {
     /// Parent directory for new worktrees, relative to the main checkout.
@@ -456,6 +514,16 @@ pub struct WorktreeSection {
     /// whatever this says now.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub port_range: Option<[u16; 2]>,
+    /// The loopback ports `devflow focus` forwards to the focused workspace
+    /// when none is named (an OAuth callback registered for
+    /// `http://localhost:3000`, say).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub focus_ports: Vec<u16>,
+    /// Who checks a new worktree out: devflow through libgit2 (the default),
+    /// or Git itself (`"git"`). Machine-local: only `devflow.local.toml` may
+    /// set it (see [`CheckoutBackend`]).
+    #[serde(skip_serializing_if = "CheckoutBackend::is_default")]
+    pub checkout: CheckoutBackend,
 }
 
 impl Default for WorktreeSection {
@@ -464,8 +532,249 @@ impl Default for WorktreeSection {
             dir: "../{repo}.worktrees".into(),
             copy: Vec::new(),
             port_range: None,
+            focus_ports: Vec::new(),
+            checkout: CheckoutBackend::Libgit2,
         }
     }
+}
+
+/// Who runs the checkout of a new worktree (`[worktree] checkout`).
+///
+/// - `libgit2` (the default): devflow creates the worktree itself. It runs no
+///   program of the repository's and refuses what libgit2 cannot check out
+///   faithfully (Git LFS, partial clones).
+/// - `git`: devflow resolves the starting point and creates the branch, then
+///   runs the `git` on `PATH` (`git worktree add`), which checks the files out
+///   the way Git does: LFS and other filters, `post-checkout` and other hooks,
+///   credential helpers, `fsmonitor`. Choosing it **authorizes Git's own
+///   execution** of whatever the repository and the user's Git configuration
+///   name, which `devflow trust` does not cover (it approves devflow's hooks,
+///   `[env]` recipes and pitchfork processes, not Git's). It is therefore a
+///   decision of the person at this machine: it is accepted in
+///   `devflow.local.toml` only, and a committed `devflow.toml` that sets it is
+///   a configuration error, so a repository cannot opt anyone in.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, Hash, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum CheckoutBackend {
+    #[default]
+    Libgit2,
+    Git,
+}
+
+impl CheckoutBackend {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            CheckoutBackend::Libgit2 => "libgit2",
+            CheckoutBackend::Git => "git",
+        }
+    }
+
+    pub fn is_default(&self) -> bool {
+        *self == CheckoutBackend::Libgit2
+    }
+}
+
+impl std::fmt::Display for CheckoutBackend {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// The keys only `devflow.local.toml` may set, as `(table, key)`: they
+/// authorize something on this machine that a repository must not grant.
+const LOCAL_ONLY_KEYS: [(&str, &str); 1] = [("worktree", "checkout")];
+
+/// A workspace's own project file, read by [`Config::load_branch`].
+pub(crate) struct BranchFile {
+    /// The file with the recipe fields of the main checkout's overlay over it:
+    /// its recipes are the ones the workspace runs.
+    pub own: Config,
+    pub path: PathBuf,
+    /// The file with the whole overlay over it, when that parses on its own:
+    /// what its shared sections are, compared with the main checkout's.
+    pub shared_view: Option<Config>,
+}
+
+/// The recipe fields of a project file or overlay: `[hooks]`, `[env]` and
+/// `[worktree] copy`. Everything else is the project's shared configuration,
+/// which only the main checkout's files decide.
+fn recipes_only(overlay: toml::Table) -> toml::Table {
+    let mut recipes = toml::Table::new();
+    for key in ["hooks", "env"] {
+        if let Some(value) = overlay.get(key) {
+            recipes.insert(key.to_string(), value.clone());
+        }
+    }
+    if let Some(copy) = overlay
+        .get("worktree")
+        .and_then(toml::Value::as_table)
+        .and_then(|worktree| worktree.get("copy"))
+    {
+        let mut worktree = toml::Table::new();
+        worktree.insert("copy".to_string(), copy.clone());
+        recipes.insert("worktree".to_string(), toml::Value::Table(worktree));
+    }
+    recipes
+}
+
+/// Refuse a project file (`devflow.toml`, committed) that sets a key only the
+/// machine-local file may set. The error names the key and the file, never
+/// the value.
+fn refuse_local_only_keys(project_file: &toml::Table, path: &Path) -> Result<()> {
+    for (table, key) in LOCAL_ONLY_KEYS {
+        let set = project_file
+            .get(table)
+            .and_then(toml::Value::as_table)
+            .is_some_and(|section| section.contains_key(key));
+        if set {
+            bail!(
+                "invalid configuration in {}: {table}.{key} is machine-local and cannot be set in \
+                 a committed file: it authorizes programs this machine runs (Git's filters and \
+                 hooks), so only devflow.local.toml may set it",
+                path.display()
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Refuse an overlay that sets a key only the machine-local file may set when
+/// the file it came from is not this machine's own.
+///
+/// The name `devflow.local.toml` is not a secret: a repository can commit a
+/// file of that name (or a link to one) and have it checked out on the next
+/// clone, so the name proves nothing. What does: the file is a regular file
+/// (not a link, which is how a path in the repository reaches a file that is
+/// somewhere else) and Git does not track it, neither in the main checkout's
+/// index (it may be staged, or ignored-but-added) nor in the commit `HEAD`
+/// names. Both are looked at only when the overlay sets such a key, so every
+/// other setting of a tracked `devflow.local.toml` keeps working.
+///
+/// The error names the file and the key, never a value.
+fn require_own_local_file(overlay: &toml::Table, local: &Path) -> Result<()> {
+    let keys: Vec<String> = LOCAL_ONLY_KEYS
+        .iter()
+        .filter(|(table, key)| {
+            overlay
+                .get(*table)
+                .and_then(toml::Value::as_table)
+                .is_some_and(|section| section.contains_key(*key))
+        })
+        .map(|(table, key)| format!("{table}.{key}"))
+        .collect();
+    if keys.is_empty() {
+        return Ok(());
+    }
+    let keys = keys.join(", ");
+    let metadata = std::fs::symlink_metadata(local)
+        .with_context(|| format!("cannot look at {}", local.display()))?;
+    if metadata.file_type().is_symlink() {
+        bail!(
+            "invalid configuration in {}: {keys} is machine-local and {} is a symbolic link, \
+             which is how a repository can put a file there that is not yours; only a regular \
+             file that Git does not track may set it",
+            local.display(),
+            LOCAL_CONFIG_FILE
+        );
+    }
+    if tracked_by_git(local)? {
+        bail!(
+            "invalid configuration in {}: {keys} is machine-local and {} is tracked by Git, so \
+             the repository ships it; it authorizes programs this machine runs (Git's filters \
+             and hooks), so only a file that is yours alone may set it. Remove the key from \
+             the tracked file, or stop tracking the file and keep it out of Git",
+            local.display(),
+            LOCAL_CONFIG_FILE
+        );
+    }
+    Ok(())
+}
+
+/// Whether the repository `file` is in tracks it: it is in the index (at any
+/// stage) or in the tree of the commit `HEAD` names. Names are compared
+/// without regard to ASCII case, since on a file system that ignores case
+/// `Devflow.local.toml` is the file `devflow.local.toml` opens. A file outside
+/// any repository is not tracked; a repository that cannot be read is an
+/// error (nothing is assumed).
+fn tracked_by_git(file: &Path) -> Result<bool> {
+    let Some(dir) = file.parent() else {
+        return Ok(false);
+    };
+    let repo = match git2::Repository::discover(dir) {
+        Ok(repo) => repo,
+        Err(error) if error.code() == git2::ErrorCode::NotFound => return Ok(false),
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!(
+                    "cannot tell whether Git tracks {}: its repository cannot be read",
+                    file.display()
+                )
+            });
+        }
+    };
+    let Some(workdir) = repo.workdir() else {
+        return Ok(false);
+    };
+    let unknown = || {
+        format!(
+            "cannot tell whether Git tracks {}: its repository cannot be read",
+            file.display()
+        )
+    };
+    let relative = std::fs::canonicalize(dir)
+        .and_then(|dir| Ok((dir, std::fs::canonicalize(workdir)?)))
+        .map(|(dir, work)| {
+            dir.strip_prefix(&work)
+                .map(|below| below.join(file.file_name().unwrap_or_default()))
+        })
+        .with_context(unknown)?
+        .map_err(|_| anyhow::anyhow!(unknown()))?;
+    let wanted: Vec<String> = relative
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy().to_ascii_lowercase())
+        .collect();
+    let wanted_path = wanted.join("/");
+    let index = repo.index().with_context(unknown)?;
+    if index
+        .iter()
+        .any(|entry| String::from_utf8_lossy(&entry.path).to_ascii_lowercase() == wanted_path)
+    {
+        return Ok(true);
+    }
+    let tree = match repo.head().and_then(|head| head.peel_to_tree()) {
+        Ok(tree) => tree,
+        // Nothing is committed yet.
+        Err(error)
+            if matches!(
+                error.code(),
+                git2::ErrorCode::UnbornBranch | git2::ErrorCode::NotFound
+            ) =>
+        {
+            return Ok(false);
+        }
+        Err(error) => return Err(error).with_context(unknown),
+    };
+    let mut current = tree;
+    for (position, name) in wanted.iter().enumerate() {
+        let next = {
+            let Some(entry) = current.iter().find(|entry| {
+                String::from_utf8_lossy(entry.name_bytes()).to_ascii_lowercase() == *name
+            }) else {
+                return Ok(false);
+            };
+            if position + 1 == wanted.len() {
+                return Ok(true);
+            }
+            entry
+                .to_object(&repo)
+                .and_then(|object| object.peel_to_tree())
+        };
+        match next {
+            Ok(next) => current = next,
+            Err(_) => return Ok(false),
+        }
+    }
+    Ok(false)
 }
 
 /// The ports a workspace's `DEVFLOW_PORT` is chosen from unless
@@ -479,7 +788,7 @@ impl WorktreeSection {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum PostgresMode {
     /// devflow runs a PostgreSQL container with `docker compose`.
@@ -489,7 +798,7 @@ pub enum PostgresMode {
     External,
 }
 
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum BusySourcePolicy {
     /// Terminate sessions on the source database, then clone (bounded retries).
@@ -502,7 +811,7 @@ pub enum BusySourcePolicy {
 }
 
 /// Whether cloned databases share blocks with their source.
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum CowCapability {
     /// Block sharing was verified on the server's data directory.
@@ -514,7 +823,7 @@ pub enum CowCapability {
     Unknown,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, JsonSchema)]
 #[serde(deny_unknown_fields, default)]
 pub struct PostgresSection {
     pub mode: PostgresMode,
@@ -531,7 +840,8 @@ pub struct PostgresSection {
     pub app_port: Option<u16>,
     /// Managed mode: address the container port is published on.
     pub bind: String,
-    /// Managed mode: fixed host port; 0 lets Docker pick one.
+    /// Managed mode: fixed host port; 0 (the default) lets devflow choose one
+    /// and keep it, recorded in the server's `admin.json`.
     pub port: u16,
     /// Display name of the default workspace's database branch.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -586,7 +896,7 @@ impl Default for PostgresSection {
 /// managed only: devflow runs the containers, so there is no `mode`,
 /// `admin_url` or port to configure (each branch's host port is allocated
 /// once and kept).
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, JsonSchema)]
 #[serde(deny_unknown_fields, default)]
 pub struct ContainerSection {
     /// Image to run, by tag or digest. Default: [`VALKEY_IMAGE`],
@@ -732,7 +1042,135 @@ impl ContainerSection {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+/// Variable a `sqlite` service exports its URL as when `env` is not set and
+/// the project has no other database service that might claim `DATABASE_URL`.
+pub const DEFAULT_SQLITE_ENV: &str = "DATABASE_URL";
+/// The variable a `sqlite` service exports its URL as when `env` is not set
+/// and the project also has a postgres or mysql service.
+pub const SQLITE_URL_ENV: &str = "SQLITE_URL";
+/// Variable a `sqlite` service exports the absolute path of its file as when
+/// `path_env` is not set.
+pub const DEFAULT_SQLITE_PATH_ENV: &str = "SQLITE_PATH";
+/// How long a clone waits for a writer to release a source when `busy_wait`
+/// is not set.
+pub const DEFAULT_SQLITE_BUSY_WAIT: Duration = Duration::from_secs(30);
+
+/// The keys of a `sqlite` service. The database is a file in the workspace:
+/// nothing runs and nothing is configured about a server, a port or an image.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, JsonSchema)]
+#[serde(deny_unknown_fields, default)]
+pub struct SqliteSection {
+    /// The database file, relative to the worktree (`db/development.sqlite3`).
+    /// Each workspace has its own, at the same relative path: a workspace's
+    /// file is cloned from its source's when the workspace is set up. The file
+    /// need not exist yet in a project that has not created it.
+    pub path: String,
+    /// Variable the `sqlite:` URL of the file is exported as. Default:
+    /// [`DEFAULT_SQLITE_ENV`], or [`SQLITE_URL_ENV`] when another service
+    /// claims `DATABASE_URL` (a postgres service, or a mysql service without
+    /// an `env` of its own when there is no postgres service).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub env: Option<String>,
+    /// Variable the absolute path of the file is exported as. Default:
+    /// [`DEFAULT_SQLITE_PATH_ENV`]. Recipes can build any other form from it
+    /// (`sqlite:///${SQLITE_PATH}` for SQLAlchemy, `file:${SQLITE_PATH}` for
+    /// Prisma).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path_env: Option<String>,
+    /// How long a clone waits for a writer to release the source file
+    /// (humantime, e.g. "30s"); then it is refused rather than copied while
+    /// it changes. Default: [`DEFAULT_SQLITE_BUSY_WAIT`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub busy_wait: Option<String>,
+    /// Refuse to clone unless the file system shares blocks (reflink); without
+    /// it a full copy is allowed and reported as `copy`.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub require_cow: bool,
+}
+
+impl SqliteSection {
+    /// The longest wait for a writer.
+    pub fn busy_wait(&self) -> Duration {
+        self.busy_wait
+            .as_deref()
+            .and_then(|text| parse_duration(text, "").ok())
+            .unwrap_or(DEFAULT_SQLITE_BUSY_WAIT)
+    }
+
+    /// The variable the absolute path is exported as.
+    pub fn path_env_name(&self) -> &str {
+        self.path_env.as_deref().unwrap_or(DEFAULT_SQLITE_PATH_ENV)
+    }
+
+    fn validate(&self, key: &str) -> Result<()> {
+        let label = key_label(key);
+        anyhow::ensure!(
+            !self.path.trim().is_empty(),
+            "services.{label}.path must be set: the database file, relative to the worktree"
+        );
+        validate_relative(&self.path).with_context(|| format!("invalid services.{label}.path"))?;
+        let path = Path::new(&self.path);
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        anyhow::ensure!(
+            !self.path.ends_with('/') && !name.is_empty(),
+            "services.{label}.path must name a file, not a directory"
+        );
+        // The files SQLite keeps beside a database are its own (whatever the
+        // case: on a case-insensitive disk `app.db-WAL` is the log of `app.db`).
+        anyhow::ensure!(
+            !names_a_sqlite_sidecar(&name),
+            "services.{label}.path names a file SQLite keeps beside a database (-wal, -shm, \
+             -journal), not a database"
+        );
+        anyhow::ensure!(
+            !matches!(
+                path.components().next(),
+                Some(std::path::Component::Normal(first))
+                    if names_a_reserved_directory(&first.to_string_lossy())
+            ),
+            "services.{label}.path must not be inside .git or .devflow"
+        );
+        for (what, variable) in [("env", &self.env), ("path_env", &self.path_env)] {
+            let Some(variable) = variable else { continue };
+            anyhow::ensure!(
+                valid_env_name(variable),
+                "services.{label}.{what}: not a valid variable name (letters, digits and `_`, \
+                 not starting with a digit)"
+            );
+            // `DATABASE_URL` is the default of a project with no other
+            // database service; whether it is free is `Config::validate`'s.
+            let own_url = what == "env" && variable == DEFAULT_SQLITE_ENV;
+            anyhow::ensure!(
+                own_url || !crate::env_file::is_reserved(variable),
+                "services.{label}.{what}: that variable is reserved, devflow sets DEVFLOW_*, \
+                 PG*, DATABASE_URL, COMPOSE_PROJECT_NAME and the URLs of the scratch databases \
+                 itself"
+            );
+        }
+        anyhow::ensure!(
+            self.env.is_none() || self.env != self.path_env,
+            "services.{label}.env and services.{label}.path_env name the same variable"
+        );
+        if let Some(text) = &self.busy_wait {
+            let wait = parse_duration(text, &format!("services.{label}.busy_wait"))?;
+            anyhow::ensure!(
+                !wait.is_zero(),
+                "services.{label}.busy_wait must be longer than zero"
+            );
+        }
+        anyhow::ensure!(
+            !SERVICE_SUBCOMMANDS.contains(&key),
+            "service key '{key}' is a reserved name (devflow uses it as a service command); \
+             choose another key for a sqlite service"
+        );
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, JsonSchema)]
 #[serde(deny_unknown_fields, default)]
 pub struct HooksSection {
     /// Run once in a new (or adopted) worktree, after payloads, database and env.
@@ -759,7 +1197,9 @@ impl Default for HooksSection {
 
 /// A framework preset: a fixed set of variables rendered from the PostgreSQL
 /// binding's connection parameters.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum EnvPreset {
     /// `DIRECT_URL` (the same URL). `SHADOW_DATABASE_URL` comes with a
@@ -900,7 +1340,24 @@ impl EnvSection {
     /// exported as `extra_vars` (see [`extra_database_env_name`]): recipes
     /// may reference those variables and cannot set them.
     pub fn validate_with(&self, extra_vars: &[String]) -> Result<()> {
+        self.validate_in(Some(extra_vars))
+    }
+
+    /// The part of [`EnvSection::validate_with`] that does not depend on the
+    /// project's services: names, template syntax, references to other recipes,
+    /// presets. What a recipe may reference and may not set depends on the
+    /// variables the services export, which are the main checkout's for a
+    /// workspace's own file: that is checked on the composition (see
+    /// [`crate::effective`]), not on the file alone.
+    pub(crate) fn validate_shape(&self) -> Result<()> {
+        self.validate_in(None)
+    }
+
+    /// `extra_vars`: the variables the services export, or `None` when they are
+    /// not known yet (see [`EnvSection::validate_shape`]).
+    fn validate_in(&self, extra_vars: Option<&[String]>) -> Result<()> {
         use crate::env_file::{Segment, is_generated, is_reserved, parse_template};
+        let exported = |name: &str| extra_vars.is_some_and(|vars| vars.iter().any(|v| v == name));
         // Errors name keys and rules, never a value: see `crate::diag`.
         for (key, template) in &self.vars {
             let label = key_label(key);
@@ -910,7 +1367,7 @@ impl EnvSection {
                  with a digit)"
             );
             anyhow::ensure!(
-                !is_reserved(key) && !extra_vars.contains(key),
+                !is_reserved(key) && !exported(key),
                 "env.{label}: reserved, devflow sets DEVFLOW_*, PG*, DATABASE_URL, \
                  COMPOSE_PROJECT_NAME, the URLs of the scratch databases \
                  (`extra_databases`) and the URLs of the container services itself"
@@ -935,7 +1392,7 @@ impl EnvSection {
                     key_label(&name)
                 );
                 anyhow::ensure!(
-                    is_generated(&name) || extra_vars.contains(&name),
+                    extra_vars.is_none() || is_generated(&name) || exported(&name),
                     "env.{label}: refers to a variable devflow does not generate. Recipes can \
                      use DATABASE_URL, the PG* variables, DEVFLOW_PROJECT, DEVFLOW_PROJECT_ROOT, \
                      DEVFLOW_WORKSPACE, DEVFLOW_WORKSPACE_PATH, DEVFLOW_SOURCE_PATH, \
@@ -1425,6 +1882,14 @@ impl Config {
     /// project file the error is [`NotInitialized`] (or the 0.x guidance when
     /// a 0.x file is found).
     pub fn load(root: &Path) -> Result<(Config, PathBuf)> {
+        Self::load_with_local(root, root)
+    }
+
+    /// [`Config::load`] for the project file in `root` with the machine-local
+    /// overlay taken from `local_dir` instead: a linked worktree carries its own
+    /// `devflow.toml` (versioned with the code), but `devflow.local.toml` is
+    /// the main checkout's and overlays every workspace of the checkout.
+    pub fn load_with_local(root: &Path, local_dir: &Path) -> Result<(Config, PathBuf)> {
         let path = match Self::find_file(root) {
             Some(path) => path,
             None => {
@@ -1446,12 +1911,15 @@ impl Config {
         // file is refused for. A partial overlay table of the current format
         // (no `engine` yet) passes; the merged result is validated below.
         check_shape(&value, &path)?;
-        let local = root.join(LOCAL_CONFIG_FILE);
+        // Before the merge, which would hide which file a value came from.
+        refuse_local_only_keys(&value, &path)?;
+        let local = local_dir.join(LOCAL_CONFIG_FILE);
         if local.is_file() {
             let text =
                 read_text(&local).with_context(|| format!("cannot read {}", local.display()))?;
             let overlay = parse_table(&text, &local)?;
             check_shape(&overlay, &local)?;
+            require_own_local_file(&overlay, &local)?;
             merge(&mut value, overlay);
         }
         // An error about the merged document names both files: the value may
@@ -1500,7 +1968,9 @@ impl Config {
     /// Parse a single document (no overlay); used to validate editor text.
     pub fn parse(text: &str) -> Result<Config> {
         let path = Path::new("devflow.toml");
-        Self::from_value(parse_table(text, path)?, path)
+        let value = parse_table(text, path)?;
+        refuse_local_only_keys(&value, path)?;
+        Self::from_value(value, path)
     }
 
     /// Parse a project file's text with the text of `devflow.local.toml`
@@ -1515,6 +1985,7 @@ impl Config {
         let base_path = Path::new(base_name);
         let mut value = parse_table(base, base_path)?;
         check_shape(&value, base_path)?;
+        refuse_local_only_keys(&value, base_path)?;
         let mut label = base_name.to_string();
         if let Some(local) = local {
             let local_path = Path::new(local_name);
@@ -1526,7 +1997,87 @@ impl Config {
         Self::from_value(value, Path::new(&label))
     }
 
-    fn from_value(mut value: toml::Table, path: &Path) -> Result<Config> {
+    /// Parse a workspace's own project file (a linked worktree's `devflow.toml`)
+    /// the way [`Config::load_branch`] does for files on disk: the main
+    /// checkout's `devflow.local.toml` overlays the **recipes** only (`[hooks]`,
+    /// `[env]`, `[worktree] copy`). Its shared fields (a `[services.db]`
+    /// override, say) belong to the main checkout's own configuration, which
+    /// they already changed: merged into a branch that lacks the service they
+    /// would be a table without an `engine`, and refuse a branch whose recipes
+    /// are fine. Likewise what only the services can decide about `[env]` (what
+    /// a recipe may reference and may not set) is left to the caller, which
+    /// checks the recipes next to the main checkout's services.
+    pub(crate) fn parse_branch_layers(
+        base: &str,
+        base_name: &str,
+        local: Option<&str>,
+        local_name: &str,
+    ) -> Result<Config> {
+        let base_path = Path::new(base_name);
+        let mut value = parse_table(base, base_path)?;
+        check_shape(&value, base_path)?;
+        refuse_local_only_keys(&value, base_path)?;
+        let mut label = base_name.to_string();
+        if let Some(local) = local {
+            let local_path = Path::new(local_name);
+            let overlay = parse_table(local, local_path)?;
+            check_shape(&overlay, local_path)?;
+            merge(&mut value, recipes_only(overlay));
+            label = merged_label(base_name, local_name);
+        }
+        // What a recipe may reference and may not set depends on the variables the
+        // services export, which are the main checkout's here: the caller checks
+        // the composition (`effective`), not this file next to its own services.
+        Self::from_value_in(value, Path::new(&label), true)
+    }
+
+    /// The workspace's own project file in `root` (a linked worktree's), read
+    /// with the recipe fields of the main checkout's `devflow.local.toml` over
+    /// it (see [`Config::parse_branch_layers`]). Errors as [`Config::load`]'s.
+    pub(crate) fn load_branch(root: &Path, local_dir: &Path) -> Result<BranchFile> {
+        let path = match Self::find_file(root) {
+            Some(path) => path,
+            None => {
+                if let Some(legacy) = legacy_file(root) {
+                    return Err(shape_error(
+                        ShapeKind::Legacy,
+                        &legacy,
+                        legacy_message(&legacy),
+                    ));
+                }
+                return Err(not_initialized(root));
+            }
+        };
+        let text = read_text(&path).with_context(|| format!("cannot read {}", path.display()))?;
+        let local = local_dir.join(LOCAL_CONFIG_FILE);
+        let overlay = if local.is_file() {
+            Some(read_text(&local).with_context(|| format!("cannot read {}", local.display()))?)
+        } else {
+            None
+        };
+        let name = path.display().to_string();
+        let own = Self::parse_branch_layers(&text, &name, overlay.as_deref(), LOCAL_CONFIG_FILE)?;
+        // What the file's shared sections are next to the same overlay, to say
+        // which of them differ from the main checkout's: the whole overlay on
+        // top, when that is a valid configuration of its own (a branch that
+        // lacks a service the overlay refines is not).
+        let shared_view = overlay.as_deref().and_then(|overlay| {
+            Self::parse_layers(&text, &name, Some(overlay), LOCAL_CONFIG_FILE).ok()
+        });
+        Ok(BranchFile {
+            own,
+            path,
+            shared_view,
+        })
+    }
+
+    fn from_value(value: toml::Table, path: &Path) -> Result<Config> {
+        Self::from_value_in(value, path, false)
+    }
+
+    /// `defer_services`: leave out what only the project's services can decide
+    /// (see [`EnvSection::validate_shape`]); the caller checks the composition.
+    fn from_value_in(mut value: toml::Table, path: &Path, defer_services: bool) -> Result<Config> {
         check_shape(&value, path)?;
         // Services are read one by one so an error names its table, and so an
         // unknown engine gets a message of its own instead of serde's.
@@ -1535,12 +2086,16 @@ impl Config {
         let mut config: Config = crate::diag::read_toml(toml::Value::Table(value), path, &[])?;
         config.services = services;
         config
-            .validate()
+            .validate_in(defer_services)
             .map_err(|e| anyhow::anyhow!("invalid configuration in {}: {e:#}", path.display()))?;
         Ok(config)
     }
 
     pub fn validate(&self) -> Result<()> {
+        self.validate_in(false)
+    }
+
+    fn validate_in(&self, defer_services: bool) -> Result<()> {
         anyhow::ensure!(
             !self.project.name.trim().is_empty(),
             "project.name must not be empty"
@@ -1555,11 +2110,22 @@ impl Config {
                 "worktree.port_range: expected [first, last] with 1024 <= first <= last <= 65535"
             );
         }
+        let mut seen = std::collections::BTreeSet::new();
+        for (index, port) in self.worktree.focus_ports.iter().enumerate() {
+            anyhow::ensure!(
+                *port >= 1024 && seen.insert(*port),
+                "worktree.focus_ports[{index}]: expected distinct ports between 1024 and 65535"
+            );
+        }
         self.hooks.validate()?;
         self.data.validate()?;
         let exports = self.exported_variables();
         let extra_vars: Vec<String> = exports.iter().map(|(name, _)| name.clone()).collect();
-        self.env.validate_with(&extra_vars)?;
+        if defer_services {
+            self.env.validate_shape()?;
+        } else {
+            self.env.validate_with(&extra_vars)?;
+        }
         let mut postgres: Option<&str> = None;
         let mut mysql: Option<&str> = None;
         for (key, service) in &self.services {
@@ -1590,6 +2156,7 @@ impl Config {
                 ServiceConfig::Valkey(section) | ServiceConfig::Redis(section) => {
                     section.validate(service.engine(), key)?;
                 }
+                ServiceConfig::Sqlite(section) => section.validate(key)?,
                 ServiceConfig::Mysql(section) => {
                     section.validate(Engine::Mysql, key)?;
                     // One mysql service: its typed fields (`MYSQL_HOST`, …)
@@ -1616,7 +2183,8 @@ impl Config {
             if let Some(first) = seen.insert(name, owner) {
                 bail!(
                     "services.{first} and services.{owner} both export the same variable \
-                     {name}; set `env` on a container service to another variable name"
+                     {name}; set `env` on a service other than postgres to another variable \
+                     name"
                 );
             }
         }
@@ -1628,6 +2196,9 @@ impl Config {
     /// `key` is not a container service.
     pub fn url_variable(&self, key: &str) -> Option<&str> {
         let service = self.services.get(key)?;
+        if let Some(sqlite) = service.as_sqlite() {
+            return Some(sqlite.env.as_deref().unwrap_or(self.sqlite_default_env()));
+        }
         Some(
             service
                 .as_container()?
@@ -1635,11 +2206,40 @@ impl Config {
         )
     }
 
+    /// The variable a `sqlite` service without `env` exports its URL as:
+    /// `DATABASE_URL` unless another service claims it (the postgres service
+    /// always does; a container service does when its URL variable is that).
+    fn sqlite_default_env(&self) -> &'static str {
+        let claimed = self.postgres().is_some()
+            || self.services.iter().any(|(key, service)| {
+                service.as_container().is_some()
+                    && self.url_variable(key) == Some(DEFAULT_SQLITE_ENV)
+            });
+        if claimed {
+            SQLITE_URL_ENV
+        } else {
+            DEFAULT_SQLITE_ENV
+        }
+    }
+
+    /// The variable `sqlite` service `key` exports the absolute path of its
+    /// file as. `None` when `key` is not a sqlite service.
+    pub fn path_variable(&self, key: &str) -> Option<&str> {
+        Some(self.services.get(key)?.as_sqlite()?.path_env_name())
+    }
+
+    /// The `sqlite` services: key and section, by key.
+    pub fn sqlite_services(&self) -> impl Iterator<Item = (&str, &SqliteSection)> {
+        self.services
+            .iter()
+            .filter_map(|(key, service)| Some((key.as_str(), service.as_sqlite()?)))
+    }
+
     /// The variables the services export beyond `DATABASE_URL` and `PG*`
     /// (which are PostgreSQL's alone): the scratch databases' URLs
-    /// (`extra_databases`), the URL of each container service and the typed
-    /// fields of a mysql service, each with the key of the service that
-    /// exports it. Recipes may reference these and cannot set them.
+    /// (`extra_databases`), the URL of each container service, the URL and
+    /// the path of each sqlite service and the typed fields of a mysql
+    /// service, each with the key of the service that exports it. Recipes may reference these and cannot set them.
     pub fn exported_variables(&self) -> Vec<(String, String)> {
         let mut out = Vec::new();
         for (key, service) in &self.services {
@@ -1651,6 +2251,10 @@ impl Config {
                 ),
                 ServiceConfig::Valkey(_) | ServiceConfig::Redis(_) => {
                     out.extend(self.url_variable(key).map(|v| (v.to_string(), key.clone())));
+                }
+                ServiceConfig::Sqlite(sqlite) => {
+                    out.extend(self.url_variable(key).map(|v| (v.to_string(), key.clone())));
+                    out.push((sqlite.path_env_name().to_string(), key.clone()));
                 }
                 ServiceConfig::Mysql(_) => {
                     out.extend(self.url_variable(key).map(|v| (v.to_string(), key.clone())));
@@ -1709,6 +2313,52 @@ impl Config {
             .map(|(key, service)| (key.as_str(), service.engine(), service.generation()))
             .collect();
         let json = serde_json::to_vec(&("env.v2", parts, self.env.canonical())).unwrap_or_default();
+        hex(&Sha256::digest(json))
+    }
+
+    /// The generation of the setup hooks: their commands, names and effective
+    /// timeouts (a timeout spelled `90s` or `1m 30s` is the same). Receipts
+    /// record it when the hooks phase completes; a workspace whose recipes now
+    /// say otherwise has to run its setup hooks again. `switch` and `teardown`
+    /// commands are not part of it: they run at their own moment.
+    pub fn hooks_generation(&self) -> String {
+        let normalized = |text: &str| {
+            humantime::parse_duration(text)
+                .map(|d| humantime::format_duration(d).to_string())
+                .unwrap_or_else(|_| text.to_string())
+        };
+        let default = normalized(&self.hooks.timeout);
+        let entries: Vec<(Option<&str>, &str, String)> = self
+            .hooks
+            .setup
+            .iter()
+            .map(|entry| {
+                (
+                    entry.name.as_deref(),
+                    entry.run.as_str(),
+                    entry
+                        .timeout
+                        .as_deref()
+                        .map(normalized)
+                        .unwrap_or_else(|| default.clone()),
+                )
+            })
+            .collect();
+        let json = serde_json::to_vec(&("hooks.v1", entries)).unwrap_or_default();
+        hex(&Sha256::digest(json))
+    }
+
+    /// The digest of the recipes this configuration carries: every hook of
+    /// every phase, the `[env]` recipes and presets and `[worktree] copy`.
+    /// What a workspace's effective configuration reports as its own content.
+    pub fn recipes_digest(&self) -> String {
+        let json = serde_json::to_vec(&(
+            "recipes.v1",
+            &self.hooks,
+            self.env.canonical(),
+            &self.worktree.copy,
+        ))
+        .unwrap_or_default();
         hex(&Sha256::digest(json))
     }
 
@@ -2005,6 +2655,21 @@ fn take_services(value: &mut toml::Table, path: &Path) -> Result<BTreeMap<String
                         );
                     }
                 }
+                Some(Engine::Sqlite) => {
+                    // A file: no server, image or port to configure.
+                    // (`busy_wait` is a postgres key and a sqlite key.)
+                    if let Some(option) = table
+                        .keys()
+                        .find(|k| POSTGRES_ONLY_KEYS.contains(&k.as_str()) && *k != "busy_wait")
+                    {
+                        bail!(
+                            "services.{label} in {}: `{option}` is not available for sqlite \
+                             services, whose database is a file in the workspace (keys: path, \
+                             env, path_env, busy_wait, require_cow)",
+                            path.display()
+                        );
+                    }
+                }
                 Some(_) => {}
                 // The unsupported name is a value: it is not repeated.
                 None => bail!(
@@ -2086,6 +2751,231 @@ mod tests {
             ..PostgresSection::default()
         };
         assert_eq!(remote.busy_policy(), BusySourcePolicy::Fail);
+    }
+
+    #[test]
+    fn the_native_checkout_is_accepted_only_in_the_local_file() {
+        let base = Config::template("shop", uuid::Uuid::new_v4(), None);
+        let committed = base.replace("[worktree]\n", "[worktree]\ncheckout = \"git\"\n");
+        assert_ne!(committed, base);
+        let local = "[worktree]\ncheckout = \"git\"\n";
+
+        // The default is libgit2, and it is not written back out.
+        let config = Config::parse(&base).unwrap();
+        assert_eq!(config.worktree.checkout, CheckoutBackend::Libgit2);
+        assert!(!toml::to_string(&config).unwrap().contains("checkout"));
+
+        // A committed file that sets it is an error naming the key and the
+        // file that may; no layer of parsing lets it through.
+        let error = format!("{:#}", Config::parse(&committed).unwrap_err());
+        assert!(error.contains("worktree.checkout"), "{error}");
+        assert!(error.contains("devflow.local.toml"), "{error}");
+        assert!(
+            Config::parse_layers(&committed, "devflow.toml", None, "devflow.local.toml").is_err()
+        );
+        assert!(ConfigDocument::validate(&committed).is_err());
+        // Setting it in both files does not make the committed one acceptable.
+        assert!(
+            Config::parse_layers(
+                &committed,
+                "devflow.toml",
+                Some(local),
+                "devflow.local.toml"
+            )
+            .is_err()
+        );
+
+        // The machine-local file may.
+        let config =
+            Config::parse_layers(&base, "devflow.toml", Some(local), "devflow.local.toml").unwrap();
+        assert_eq!(config.worktree.checkout, CheckoutBackend::Git);
+        assert_eq!(config.worktree.checkout.as_str(), "git");
+
+        // On disk, with either spelling of the project file.
+        for name in CONFIG_FILES {
+            let dir = tempfile::tempdir().unwrap();
+            write(dir.path(), name, &committed);
+            let error = format!("{:#}", Config::load(dir.path()).unwrap_err());
+            assert!(error.contains("worktree.checkout"), "{name}: {error}");
+            assert!(error.contains(name), "{name}: {error}");
+            std::fs::remove_file(dir.path().join(name)).unwrap();
+            write(dir.path(), name, &base);
+            write(dir.path(), LOCAL_CONFIG_FILE, local);
+            let (config, _) = Config::load(dir.path()).unwrap();
+            assert_eq!(config.worktree.checkout, CheckoutBackend::Git, "{name}");
+        }
+
+        // A value that is neither backend is an error that names the key and
+        // does not repeat the value.
+        let error = format!(
+            "{:#}",
+            Config::parse_layers(
+                &base,
+                "devflow.toml",
+                Some("[worktree]\ncheckout = \"svn-export\"\n"),
+                "devflow.local.toml"
+            )
+            .unwrap_err()
+        );
+        assert!(error.contains("worktree.checkout"), "{error}");
+        assert!(!error.contains("svn-export"), "{error}");
+    }
+
+    /// Stage `names` (relative to the repository) and, with `commit`, commit.
+    fn git_add(repo: &git2::Repository, names: &[&str], commit: bool) {
+        let mut index = repo.index().unwrap();
+        for name in names {
+            index.add_path(Path::new(name)).unwrap();
+        }
+        index.write().unwrap();
+        if commit {
+            let tree = repo.find_tree(index.write_tree().unwrap()).unwrap();
+            let signature = git2::Signature::now("t", "t@example.com").unwrap();
+            let parents: Vec<git2::Commit> = repo
+                .head()
+                .ok()
+                .and_then(|head| head.peel_to_commit().ok())
+                .into_iter()
+                .collect();
+            let parents: Vec<&git2::Commit> = parents.iter().collect();
+            repo.commit(Some("HEAD"), &signature, &signature, "c", &tree, &parents)
+                .unwrap();
+        }
+    }
+
+    #[test]
+    fn a_local_file_the_repository_ships_cannot_choose_the_native_checkout() {
+        let base = Config::template("shop", uuid::Uuid::new_v4(), None);
+        let local = "[worktree]\ncheckout = \"git\"\n";
+        let dir = tempfile::tempdir().unwrap();
+        let repo = git2::Repository::init(dir.path()).unwrap();
+        write(dir.path(), "devflow.toml", &base);
+        git_add(&repo, &["devflow.toml"], true);
+        let refused = |dir: &Path, why: &str| {
+            let error = format!("{:#}", Config::load(dir).unwrap_err());
+            assert!(error.contains("worktree.checkout"), "{why}: {error}");
+            assert!(
+                error.contains(&dir.join(LOCAL_CONFIG_FILE).display().to_string()),
+                "{why}: the file is named: {error}"
+            );
+            error
+        };
+
+        // The user's own file, untracked: accepted.
+        write(dir.path(), LOCAL_CONFIG_FILE, local);
+        let (config, _) = Config::load(dir.path()).unwrap();
+        assert_eq!(config.worktree.checkout, CheckoutBackend::Git);
+        // Ignored files are untracked too.
+        write(dir.path(), ".gitignore", "devflow.local.toml\n");
+        assert!(Config::load(dir.path()).is_ok());
+
+        // Staged by `git add -f`, not committed yet.
+        git_add(&repo, &[LOCAL_CONFIG_FILE], false);
+        let error = refused(dir.path(), "staged");
+        assert!(error.contains("tracked by Git"), "{error}");
+        // Committed: the repository ships it.
+        git_add(&repo, &[LOCAL_CONFIG_FILE], true);
+        refused(dir.path(), "committed");
+        // Taken out of the index but still in the commit `HEAD` names.
+        let mut index = repo.index().unwrap();
+        index.remove_path(Path::new(LOCAL_CONFIG_FILE)).unwrap();
+        index.write().unwrap();
+        refused(dir.path(), "only in HEAD");
+        // Nowhere in Git any more: accepted again.
+        git_add(&repo, &[], true);
+        assert!(Config::load(dir.path()).is_ok());
+
+        // A tracked file that does not set the key is a local file like any
+        // other: its other settings keep working.
+        write(
+            dir.path(),
+            LOCAL_CONFIG_FILE,
+            "[worktree]\nport_range = [41000, 41999]\n",
+        );
+        git_add(&repo, &[LOCAL_CONFIG_FILE], true);
+        let (config, _) = Config::load(dir.path()).unwrap();
+        assert_eq!(config.worktree.checkout, CheckoutBackend::Libgit2);
+        assert_eq!(config.worktree.port_range, Some([41000, 41999]));
+
+        // A linked worktree's own devflow.toml is read with the main
+        // checkout's local file, and that file is checked, not the worktree's.
+        write(dir.path(), LOCAL_CONFIG_FILE, local);
+        let linked = tempfile::tempdir().unwrap();
+        write(linked.path(), "devflow.toml", &base);
+        let error = format!(
+            "{:#}",
+            Config::load_with_local(linked.path(), dir.path()).unwrap_err()
+        );
+        assert!(error.contains("tracked by Git"), "{error}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_local_file_that_is_a_link_cannot_choose_the_native_checkout() {
+        let base = Config::template("shop", uuid::Uuid::new_v4(), None);
+        let dir = tempfile::tempdir().unwrap();
+        let repo = git2::Repository::init(dir.path()).unwrap();
+        write(dir.path(), "devflow.toml", &base);
+        git_add(&repo, &["devflow.toml"], true);
+        // A file somewhere else, reached through a link (even one Git does
+        // not track: a repository's link is how a checkout reaches it).
+        let elsewhere = tempfile::tempdir().unwrap();
+        write(
+            elsewhere.path(),
+            "mine.toml",
+            "[worktree]\ncheckout = \"git\"\n",
+        );
+        std::os::unix::fs::symlink(
+            elsewhere.path().join("mine.toml"),
+            dir.path().join(LOCAL_CONFIG_FILE),
+        )
+        .unwrap();
+        let error = format!("{:#}", Config::load(dir.path()).unwrap_err());
+        assert!(error.contains("worktree.checkout"), "{error}");
+        assert!(error.contains("symbolic link"), "{error}");
+        assert!(error.contains(LOCAL_CONFIG_FILE), "{error}");
+
+        // A link that sets nothing local-only is read as before.
+        write(
+            elsewhere.path(),
+            "mine.toml",
+            "[worktree]\nport_range = [41000, 41999]\n",
+        );
+        let (config, _) = Config::load(dir.path()).unwrap();
+        assert_eq!(config.worktree.port_range, Some([41000, 41999]));
+
+        // The same link, committed.
+        write(
+            elsewhere.path(),
+            "mine.toml",
+            "[worktree]\ncheckout = \"git\"\n",
+        );
+        git_add(&repo, &[LOCAL_CONFIG_FILE], true);
+        assert!(Config::load(dir.path()).is_err());
+    }
+
+    #[test]
+    fn tracked_files_are_found_whatever_their_case_and_wherever_the_project_is() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = git2::Repository::init(dir.path()).unwrap();
+        std::fs::create_dir(dir.path().join("services")).unwrap();
+        write(dir.path(), "services/Devflow.Local.toml", "");
+        write(dir.path(), "README", "");
+        git_add(&repo, &["services/Devflow.Local.toml", "README"], true);
+        // The spelling a case-insensitive file system also opens.
+        assert!(tracked_by_git(&dir.path().join("services/devflow.local.toml")).unwrap());
+        assert!(!tracked_by_git(&dir.path().join("services/other.toml")).unwrap());
+        assert!(!tracked_by_git(&dir.path().join("devflow.local.toml")).unwrap());
+        // In the commit only, deeper than the root.
+        let mut index = repo.index().unwrap();
+        index
+            .remove_path(Path::new("services/Devflow.Local.toml"))
+            .unwrap();
+        index.write().unwrap();
+        assert!(tracked_by_git(&dir.path().join("services/devflow.local.toml")).unwrap());
+        // Outside any repository nothing is tracked.
+        let plain = tempfile::tempdir().unwrap();
+        assert!(!tracked_by_git(&plain.path().join("devflow.local.toml")).unwrap());
     }
 
     #[test]
@@ -2209,7 +3099,8 @@ mod tests {
     fn unknown_or_missing_engines_are_refused_by_name() {
         let error = message("[services.cache]\nengine = \"oraclehunter2\"\n");
         assert!(
-            error.contains("unsupported engine (supported: postgres, valkey, redis, mysql)"),
+            error
+                .contains("unsupported engine (supported: postgres, valkey, redis, mysql, sqlite)"),
             "{error}"
         );
         assert!(error.contains("services.cache"), "{error}");
@@ -3195,7 +4086,7 @@ mod tests {
             ),
             (
                 "[worktree]\nbogus = 1\n",
-                "worktree.bogus: unknown key (expected one of `dir`, `copy`, `port_range`)",
+                "worktree.bogus: unknown key (expected one of `dir`, `copy`, `port_range`, `focus_ports`, `checkout`)",
             ),
             (
                 "[project]\nname = 123456789\n",
@@ -3659,6 +4550,196 @@ API_URL = "http://localhost:3000/${DEVFLOW_WORKSPACE}"
         .unwrap();
         assert_eq!(config.postgres().unwrap().0, "db");
         assert_eq!(config.containers().count(), 2);
+    }
+
+    #[test]
+    fn a_sqlite_service_is_a_file_with_its_own_keys() {
+        let config =
+            parse("[services.app]\nengine = \"sqlite\"\npath = \"db/dev.sqlite3\"\n").unwrap();
+        let (key, section) = config.sqlite_services().next().unwrap();
+        assert_eq!(key, "app");
+        assert_eq!(section.path, "db/dev.sqlite3");
+        assert_eq!(section.busy_wait(), DEFAULT_SQLITE_BUSY_WAIT);
+        assert!(!section.require_cow);
+        assert_eq!(config.services["app"].engine(), Engine::Sqlite);
+        assert!(Engine::Sqlite.is_file() && !Engine::Sqlite.is_container());
+        assert!(!Engine::Postgres.is_file() && !Engine::Mysql.is_file());
+        assert_eq!(Engine::parse("sqlite"), Some(Engine::Sqlite));
+        assert_eq!(Engine::Sqlite.to_string(), "sqlite");
+        // It is not a container service: nothing runs, nothing is pulled.
+        assert_eq!(config.containers().count(), 0);
+        assert_eq!(Engine::Sqlite.default_image(), None);
+
+        // Alone, it owns DATABASE_URL; its path has a variable of its own.
+        assert_eq!(config.url_variable("app"), Some("DATABASE_URL"));
+        assert_eq!(config.path_variable("app"), Some("SQLITE_PATH"));
+        let exported: Vec<_> = config
+            .exported_variables()
+            .into_iter()
+            .map(|(n, _)| n)
+            .collect();
+        assert_eq!(exported, ["DATABASE_URL", "SQLITE_PATH"]);
+        // Beside a service that claims DATABASE_URL it leaves it alone ...
+        for other in [
+            "[services.db]\nengine = \"postgres\"\n",
+            "[services.sql]\nengine = \"mysql\"\n",
+        ] {
+            let both = parse(&format!(
+                "{other}[services.app]\nengine = \"sqlite\"\npath = \"app.db\"\n"
+            ))
+            .unwrap();
+            assert_eq!(both.url_variable("app"), Some("SQLITE_URL"), "{other}");
+        }
+        // ... and keeps it beside one that does not.
+        let free = parse(
+            "[services.sql]\nengine = \"mysql\"\nenv = \"MYSQL_URL\"\n\
+             [services.cache]\nengine = \"valkey\"\n\
+             [services.app]\nengine = \"sqlite\"\npath = \"app.db\"\n",
+        )
+        .unwrap();
+        assert_eq!(free.url_variable("app"), Some("DATABASE_URL"));
+        // Explicit names win, for both variables.
+        let chosen = parse(
+            "[services.app]\nengine = \"sqlite\"\npath = \"app.db\"\nenv = \"APP_DB\"\n\
+             path_env = \"APP_DB_FILE\"\nbusy_wait = \"2s\"\nrequire_cow = true\n",
+        )
+        .unwrap();
+        assert_eq!(chosen.url_variable("app"), Some("APP_DB"));
+        assert_eq!(chosen.path_variable("app"), Some("APP_DB_FILE"));
+        let (_, section) = chosen.sqlite_services().next().unwrap();
+        assert_eq!(section.busy_wait(), Duration::from_secs(2));
+        assert!(section.require_cow);
+        // A recipe may read both variables, and cannot set them.
+        assert!(
+            parse(
+                "[services.app]\nengine = \"sqlite\"\npath = \"app.db\"\n\
+                 [env]\nPRISMA_URL = \"file:${SQLITE_PATH}\"\n"
+            )
+            .is_ok()
+        );
+        let error = message(
+            "[services.app]\nengine = \"sqlite\"\npath = \"app.db\"\n\
+             [env]\nSQLITE_PATH = \"x\"\n",
+        );
+        assert!(error.contains("SQLITE_PATH"), "{error}");
+    }
+
+    #[test]
+    fn sidecar_and_reserved_names_are_judged_the_way_a_case_insensitive_disk_reads_them() {
+        for name in [
+            "a.db-wal",
+            "a.db-WAL",
+            "a.db-Shm",
+            "A.DB-JOURNAL",
+            "a.db-\u{17f}hm",
+        ] {
+            assert!(names_a_sqlite_sidecar(name), "{name}");
+        }
+        for name in [
+            "a.db",
+            "wal",
+            "a.db-wal2",
+            "a.db-walx",
+            "a-wal.db",
+            "a.db.journal",
+        ] {
+            assert!(!names_a_sqlite_sidecar(name), "{name}");
+        }
+        for name in [".git", ".GIT", ".Git", ".devflow", ".DEVFLOW", ".DevFlow"] {
+            assert!(names_a_reserved_directory(name), "{name}");
+        }
+        for name in [".github", "git", ".devflows", "devflow"] {
+            assert!(!names_a_reserved_directory(name), "{name}");
+        }
+    }
+
+    #[test]
+    fn a_sqlite_service_needs_a_path_inside_the_worktree_and_nothing_a_server_has() {
+        let sqlite =
+            |extra: &str| message(&format!("[services.app]\nengine = \"sqlite\"\n{extra}\n"));
+        assert!(
+            sqlite("").contains("services.app.path must be set"),
+            "{}",
+            sqlite("")
+        );
+        for (path, why) in [
+            ("/var/db.sqlite3", "absolute"),
+            ("../db.sqlite3", ".."),
+            ("db/", "file"),
+            (".git/app.db", ".git"),
+            (".devflow/app.db", ".devflow"),
+            ("app.db-wal", "-wal"),
+            ("app.db-shm", "-shm"),
+            ("app.db-journal", "-journal"),
+            // The same names on a disk that ignores case: the log of `app.db`.
+            ("db/app.sqlite3-WAL", "-WAL"),
+            ("db/app.sqlite3-Shm", "-Shm"),
+            ("db/APP.db-JOURNAL", "-JOURNAL"),
+            ("db/app.sqlite3-\u{17f}hm", "long s folds to s"),
+            (".GIT/app.db", ".GIT"),
+            (".DevFlow/app.db", ".DevFlow"),
+        ] {
+            let error = sqlite(&format!("path = \"{path}\""));
+            assert!(error.contains("services.app.path"), "{path}: {error}");
+            let _ = why;
+        }
+        // No server keys, no image.
+        for option in [
+            "port = 5432",
+            "mode = \"managed\"",
+            "database = \"x\"",
+            "bind = \"127.0.0.1\"",
+        ] {
+            let error = sqlite(&format!("path = \"a.db\"\n{option}"));
+            assert!(
+                error.contains("not available for sqlite services"),
+                "{option}: {error}"
+            );
+        }
+        assert!(sqlite("path = \"a.db\"\nimage = \"x\"").contains("image"));
+        assert!(sqlite("path = \"a.db\"\nenv = \"1BAD\"").contains("services.app.env"));
+        assert!(
+            sqlite("path = \"a.db\"\nenv = \"PGHOST\"").contains("reserved"),
+            "{}",
+            sqlite("path = \"a.db\"\nenv = \"PGHOST\"")
+        );
+        assert!(sqlite("path = \"a.db\"\nenv = \"X\"\npath_env = \"X\"").contains("same variable"));
+        assert!(sqlite("path = \"a.db\"\nbusy_wait = \"0s\"").contains("longer than zero"));
+        assert!(sqlite("path = \"a.db\"\nbusy_wait = \"soon\"").contains("busy_wait"));
+        // `status` and friends are service commands, not keys.
+        assert!(
+            message("[services.status]\nengine = \"sqlite\"\npath = \"a.db\"\n")
+                .contains("reserved")
+        );
+        // Two services cannot claim one variable, and DATABASE_URL is
+        // postgres's when it is there.
+        let error = message(
+            "[services.a]\nengine = \"sqlite\"\npath = \"a.db\"\n\
+             [services.b]\nengine = \"sqlite\"\npath = \"b.db\"\n",
+        );
+        assert!(error.contains("both export the same variable"), "{error}");
+        let error = message(
+            "[services.db]\nengine = \"postgres\"\n\
+             [services.a]\nengine = \"sqlite\"\npath = \"a.db\"\nenv = \"DATABASE_URL\"\n",
+        );
+        assert!(error.contains("DATABASE_URL"), "{error}");
+        // Two files with variables of their own are fine, and so is a path
+        // with a directory.
+        let config = parse(
+            "[services.a]\nengine = \"sqlite\"\npath = \"a.db\"\n\
+             [services.b]\nengine = \"sqlite\"\npath = \"data/b.db\"\nenv = \"B_URL\"\n\
+             path_env = \"B_PATH\"\n",
+        )
+        .unwrap();
+        assert_eq!(config.sqlite_services().count(), 2);
+        // The generation follows what the file is, not how long a clone waits.
+        let a = parse("[services.a]\nengine = \"sqlite\"\npath = \"a.db\"\n").unwrap();
+        let waits =
+            parse("[services.a]\nengine = \"sqlite\"\npath = \"a.db\"\nbusy_wait = \"1m\"\n")
+                .unwrap();
+        let moved = parse("[services.a]\nengine = \"sqlite\"\npath = \"b.db\"\n").unwrap();
+        assert_eq!(a.service_generation("a"), waits.service_generation("a"));
+        assert_ne!(a.service_generation("a"), moved.service_generation("a"));
     }
 
     #[test]

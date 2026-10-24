@@ -21,7 +21,7 @@
 //! `processes` record has to hold the process lock ([`Receipt::update_processes`]
 //! takes it as an argument), and takes the receipt lock briefly itself.
 use crate::config::{Config, Engine};
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result, bail, ensure};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -214,7 +214,7 @@ pub struct ExtraBinding {
 
 /// How a container service's data was cloned, as reported to the user
 /// ("services: cache reflink"): never assumed from the filesystem.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CloneReport {
     /// `reflink` or `copy`; `None` for an empty root (nothing was cloned).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -325,6 +325,38 @@ impl ServiceBinding {
         }
     }
 
+    /// A `sqlite` binding: the database is the file `relative` (the service's
+    /// `path`) in the worktree. `id` is the identity of the creation (journaled
+    /// before the file existed); `url` is the `sqlite:` URL, for display (what
+    /// `.devflow/env` exports follows the worktree's present location);
+    /// `owned` is false for a file that was already there (the default
+    /// workspace's own, or one the workspace brought with it), which devflow
+    /// never resets or removes.
+    pub fn sqlite(
+        id: uuid::Uuid,
+        relative: String,
+        url: String,
+        source: String,
+        owned: bool,
+        cloned: CloneReport,
+        applied: Option<String>,
+    ) -> Self {
+        Self {
+            engine: Engine::Sqlite,
+            branch_id: Some(id),
+            database: relative,
+            role: String::new(),
+            url,
+            endpoint: None,
+            cloned: Some(cloned),
+            source,
+            owned,
+            applied,
+            orphaned: false,
+            extras: BTreeMap::new(),
+        }
+    }
+
     /// The URL of scratch database `name`: this binding's URL (login,
     /// password, endpoint, options) with the scratch database in place of the
     /// branch's own. `None` when the binding lists no such database.
@@ -353,11 +385,27 @@ pub struct Drift {
     pub removed: Vec<String>,
     /// `.devflow/env` was written under another env generation.
     pub env: bool,
+    /// The setup hooks that last completed here are not the ones the
+    /// workspace's recipes carry now.
+    pub hooks: bool,
 }
 
 impl Drift {
     pub fn is_empty(&self) -> bool {
-        self.added.is_empty() && self.changed.is_empty() && self.removed.is_empty() && !self.env
+        self.added.is_empty()
+            && self.changed.is_empty()
+            && self.removed.is_empty()
+            && !self.env
+            && !self.hooks
+    }
+
+    /// Only the setup hooks changed: nothing else reopens.
+    fn hooks_only(&self) -> bool {
+        self.hooks
+            && self.added.is_empty()
+            && self.changed.is_empty()
+            && self.removed.is_empty()
+            && !self.env
     }
 
     /// A short sentence fragment for phase details.
@@ -378,8 +426,11 @@ impl Drift {
         if !self.removed.is_empty() {
             parts.push(format!("service {} removed", quoted(&self.removed)));
         }
-        if parts.is_empty() {
+        if self.env || (parts.is_empty() && !self.hooks) {
             parts.push("environment settings changed".into());
+        }
+        if self.hooks {
+            parts.push("setup hooks changed".into());
         }
         parts.join(", ")
     }
@@ -434,6 +485,21 @@ fn digest(value: &impl Serialize) -> String {
         .collect()
 }
 
+/// The choice to run the default workspace's recipes (hooks, `[env]`, copy
+/// list) in a workspace whose own `devflow.toml` cannot supply them.
+///
+/// It is made by a person (the button, `--use-default-recipes`), never by
+/// devflow, and it holds only while the workspace has no valid recipes of its
+/// own: once its file is valid again the workspace runs its own and the choice
+/// is cleared ([`Receipt::default_recipes`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DefaultRecipes {
+    pub chosen_at: DateTime<Utc>,
+    /// Why the workspace's own recipes were not usable when it was chosen
+    /// (names the file, never a value).
+    pub because: String,
+}
+
 /// A branch creation that a service began and whose credentials are not
 /// recorded yet. It is written before the branch exists, with the identity the
 /// branch will have, so a crash between the two is recovered by that identity
@@ -451,6 +517,11 @@ pub struct PendingBranch {
     /// and is looked for in every backend.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub engine: Option<Engine>,
+    /// A sqlite creation: the identity of the file that was staged, recorded
+    /// before it is installed. A recovery adopts a file at the destination only
+    /// when it is that very file; one somebody else put there is not ours.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file: Option<crate::sqlite::Identity>,
 }
 
 /// Daemons devflow started for a workspace and has not seen stop.
@@ -546,6 +617,22 @@ pub struct Receipt {
     pub payload: Vec<PayloadRecord>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hooks_digest: Option<String>,
+    /// The generation of the setup hooks ([`Config::hooks_generation`]) that
+    /// last completed here. A receipt from before it was recorded has none and
+    /// is adopted as it is, never reopened for it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hooks_generation: Option<String>,
+    /// The choice to use the default workspace's recipes while this
+    /// workspace's own file has none that is valid; see [`DefaultRecipes`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_recipes: Option<DefaultRecipes>,
+    /// Written by a devflow that reads each workspace's recipes from its own
+    /// branch. A receipt without it is from the time every workspace ran the
+    /// default workspace's recipes: where its branch has none of its own it
+    /// keeps them, as before ([`Receipt::keeps_default_recipes`]), and the first
+    /// run under the receipt lock records that as the choice and says so.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub workspace_recipes: bool,
     /// When the setup hooks last ran with `--skip-mise-check`: nobody checked
     /// that mise hands them this workspace's variables. Cleared when the
     /// hooks phase runs again with the check.
@@ -575,6 +662,14 @@ pub struct Receipt {
     /// resumes at the same candidate.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_app_port: Option<u16>,
+    /// When somebody asked for the workspace's own containers and daemons to
+    /// be stopped to rest it ([`crate::suspend`]); cleared when it is entered
+    /// again. Nothing ever sets it by itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub suspended_at: Option<DateTime<Utc>>,
+    /// Kept out of `suspend --idle`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub pinned: bool,
 }
 
 impl Receipt {
@@ -603,6 +698,9 @@ impl Receipt {
             phases: Default::default(),
             payload: Vec::new(),
             hooks_digest: None,
+            hooks_generation: None,
+            default_recipes: None,
+            workspace_recipes: true,
             mise_check_skipped_at: None,
             processes: None,
             created_at: now,
@@ -611,6 +709,8 @@ impl Receipt {
             app_port: None,
             app_port_source: None,
             pending_app_port: None,
+            suspended_at: None,
+            pinned: false,
         }
     }
 
@@ -753,6 +853,13 @@ impl Receipt {
                             || written == previous_env_generation_without_services(config)
                             || written == legacy_env_generation_without_services(config)))
             }),
+            // A receipt that never recorded the generation of its hooks is
+            // adopted as it is: nothing says they changed.
+            hooks: self
+                .hooks_generation
+                .as_deref()
+                .is_some_and(|written| written != config.hooks_generation())
+                && self.phase(Phase::Hooks).state == PhaseState::Done,
             ..Drift::default()
         };
         if skipped {
@@ -815,6 +922,13 @@ impl Receipt {
         self.exported.len() != before
     }
 
+    /// Whether this workspace runs the default workspace's recipes where its own
+    /// branch has none: it chose them, or it was set up before recipes were per
+    /// workspace, when every workspace ran them (see [`Receipt::workspace_recipes`]).
+    pub fn keeps_default_recipes(&self) -> bool {
+        self.default_recipes.is_some() || !self.workspace_recipes
+    }
+
     /// Record that `.devflow/env` was just written for `config`. A workspace
     /// whose services were skipped on request has no service in its file, so
     /// the generation it records leaves them out.
@@ -824,6 +938,75 @@ impl Receipt {
         } else {
             config.env_generation()
         });
+    }
+
+    /// Record that the setup hooks of `config` just completed here.
+    pub fn stamp_hooks_generation(&mut self, config: &Config) {
+        self.hooks_generation = Some(config.hooks_generation());
+    }
+
+    /// A receipt that completed its hooks before their generation was
+    /// recorded takes the current one as its own: nothing says they changed,
+    /// and a later change to the recipes is then seen. Only under the receipt
+    /// lock, as every write. Returns whether the receipt changed.
+    ///
+    /// `ran` is the configuration whose setup hooks a receipt from before
+    /// recipes were per workspace actually ran: the default workspace's. Where
+    /// the hooks of `config` are not those, they never ran here, and recording
+    /// them as run would hide that for good: nothing is adopted (see
+    /// [`Receipt::reopen_hooks_that_never_ran`], which reopens the phase).
+    pub fn adopt_hooks_generation(&mut self, config: &Config, ran: &Config) -> bool {
+        if self.hooks_generation.is_some() || self.phase(Phase::Hooks).state != PhaseState::Done {
+            return false;
+        }
+        if self.hooks_never_ran(config, ran) {
+            return false;
+        }
+        self.stamp_hooks_generation(config);
+        true
+    }
+
+    /// A receipt from before recipes were per workspace (no
+    /// [`Receipt::workspace_recipes`]) whose hooks completed under no recorded
+    /// generation ran the setup hooks of `ran`, the default workspace's. If the
+    /// workspace's own setup hooks are others, they have not run here.
+    fn hooks_never_ran(&self, config: &Config, ran: &Config) -> bool {
+        !self.workspace_recipes && config.hooks_generation() != ran.hooks_generation()
+    }
+
+    /// Reopen the `hooks` phase of a receipt from before recipes were per
+    /// workspace when the workspace's setup hooks are not the ones that ran
+    /// (`ran`: the default workspace's): they run at the next setup, approved as
+    /// any hooks are, and the reason is the phase's detail. Returns whether it
+    /// reopened anything; calling it again changes nothing. The services and the
+    /// environment stand.
+    pub fn reopen_hooks_that_never_ran(&mut self, config: &Config, ran: &Config) -> bool {
+        if self.hooks_generation.is_some()
+            || self.phase(Phase::Hooks).state != PhaseState::Done
+            || !self.hooks_never_ran(config, ran)
+        {
+            return false;
+        }
+        self.reopen_phase(
+            Phase::Hooks,
+            "this workspace was set up when every workspace ran the default workspace's setup \
+             hooks, and its branch has other setup hooks, which have not run here; setup has \
+             to run them"
+                .into(),
+        )
+    }
+
+    /// Reopen what a workspace without usable recipes invalidates: the
+    /// `payload` (its copy list), `env` (its recipes) and `hooks` phases, each
+    /// only if it is complete, as required skips. Nothing of the main
+    /// checkout's recipes stands in for them. Returns whether anything
+    /// changed; calling it again changes nothing.
+    pub fn reopen_without_recipes(&mut self, why: &str) -> bool {
+        let mut changed = false;
+        for phase in [Phase::Payload, Phase::Env, Phase::Hooks] {
+            changed |= self.reopen_phase(phase, why.to_string());
+        }
+        changed
     }
 
     /// Reopen what a changed configuration invalidates: the `services` phase
@@ -840,6 +1023,13 @@ impl Receipt {
             return false;
         }
         let mut changed = false;
+        if drift.hooks_only() {
+            // The setup hooks alone: the services and `.devflow/env` stand.
+            return self.reopen_phase(
+                Phase::Hooks,
+                "the setup hooks changed since they last ran; setup has to run again".into(),
+            );
+        }
         if !drift.added.is_empty() || !drift.changed.is_empty() {
             changed |= self.reopen_phase(
                 Phase::Services,
@@ -1127,15 +1317,21 @@ impl Receipt {
         ensure_git_dir(git_dir)?;
         crate::ledger::sync(git_dir, self)?;
         let text = serde_json::to_vec_pretty(self)?;
-        crate::fsutil::write_atomic(&Self::path(git_dir), &text, true)
+        // Git can remove the directory at any moment, also after the checks
+        // above: the write never creates the directory it goes into, or any
+        // ancestor of it, so a worktree Git removed stays removed and the
+        // caller hears of it instead of provisioning on for a workspace that
+        // is gone.
+        after_record();
+        devflow_dir(git_dir)?;
+        crate::fsutil::write_atomic_in_existing_dir(&Self::path(git_dir), &text, true)
     }
 
     /// Exclusive lock for a setup run on this worktree. Returns `None` when
     /// another process holds it.
     pub fn try_lock(git_dir: &Path) -> Result<Option<ReceiptLock>> {
         ensure_git_dir(git_dir)?;
-        let dir = git_dir.join("devflow");
-        std::fs::create_dir_all(&dir)?;
+        let dir = devflow_dir(git_dir)?;
         let file = std::fs::OpenOptions::new()
             .create(true)
             .truncate(false)
@@ -1156,8 +1352,7 @@ impl Receipt {
     /// lock order.
     pub fn try_process_lock(git_dir: &Path) -> Result<Option<ProcessLock>> {
         ensure_git_dir(git_dir)?;
-        let dir = git_dir.join("devflow");
-        std::fs::create_dir_all(&dir)?;
+        let dir = devflow_dir(git_dir)?;
         let file = std::fs::OpenOptions::new()
             .create(true)
             .truncate(false)
@@ -1260,6 +1455,61 @@ fn ensure_git_dir(git_dir: &Path) -> Result<()> {
         git_dir.display()
     );
     Ok(())
+}
+
+/// `<git_dir>/devflow`, created if it is not there, while `git_dir` is. Only
+/// that one level is created (never an ancestor): a Git directory that went
+/// away between the caller's check and this call is an error, not something to
+/// bring back.
+fn devflow_dir(git_dir: &Path) -> Result<PathBuf> {
+    let dir = git_dir.join("devflow");
+    match std::fs::create_dir(&dir) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && dir.is_dir() => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            bail!(
+                "the Git directory of this worktree is gone ({}): Git removed the worktree, and \
+                 nothing is written into a directory it no longer has",
+                git_dir.display()
+            );
+        }
+        Err(e) => {
+            return Err(e).with_context(|| format!("cannot create {}", dir.display()));
+        }
+    }
+    Ok(dir)
+}
+
+/// The directory for the logs of `git_dir`'s workspace, created below the Git
+/// directory the same way ([`devflow_dir`]).
+pub(crate) fn logs_dir_in_existing(git_dir: &Path) -> Result<PathBuf> {
+    let devflow = devflow_dir(git_dir)?;
+    let logs = devflow.join("logs");
+    match std::fs::create_dir(&logs) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && logs.is_dir() => {}
+        Err(e) => {
+            return Err(e).with_context(|| format!("cannot create {}", logs.display()));
+        }
+    }
+    Ok(logs)
+}
+
+// Test seam: runs between the record being written and the receipt file being
+// written, where a host can remove the worktree.
+#[cfg(test)]
+thread_local! {
+    pub(crate) static AFTER_RECORD: std::cell::RefCell<Option<Box<dyn Fn()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+fn after_record() {
+    #[cfg(test)]
+    AFTER_RECORD.with(|hook| {
+        if let Some(hook) = &*hook.borrow() {
+            hook();
+        }
+    });
 }
 
 /// Held for the duration of a setup run; released on drop.
@@ -1915,6 +2165,185 @@ mod tests {
         let mut attached = Receipt::new(uuid::Uuid::new_v4(), "w", None);
         attached.services.insert("db".into(), binding(None));
         assert!(attached.drift(&after).removed.is_empty());
+    }
+
+    fn done_receipt(config: &Config) -> Receipt {
+        let mut receipt = Receipt::new(uuid::Uuid::new_v4(), "w", None);
+        for phase in Phase::ALL {
+            receipt.set_phase(phase, PhaseState::Done, None);
+        }
+        receipt.stamp_env_generation(config);
+        receipt.stamp_hooks_generation(config);
+        receipt
+    }
+
+    #[test]
+    fn a_change_to_the_setup_hooks_alone_reopens_the_hooks_alone() {
+        let before =
+            Config::parse("[project]\nname = \"s\"\nid = \"0b3c9d2e-1111-4222-8333-444455556666\"\n[hooks]\nsetup = [\"a\"]\nswitch = [\"s\"]\n")
+                .unwrap();
+        let mut receipt = done_receipt(&before);
+        assert!(receipt.drift(&before).is_empty());
+
+        // `switch` and `teardown` run at their own moment: no generation.
+        let mut switched = before.clone();
+        switched.hooks.switch = vec!["other".into()];
+        switched.hooks.teardown = vec!["down".into()];
+        assert!(receipt.drift(&switched).is_empty());
+        assert!(!receipt.reopen(&switched));
+
+        // The setup commands (or their timeout, spelled either way) are.
+        let mut timed = before.clone();
+        timed.hooks.setup[0].timeout = Some("1m 30s".into());
+        let at_90s = {
+            let mut c = before.clone();
+            c.hooks.setup[0].timeout = Some("90s".into());
+            c
+        };
+        assert_eq!(timed.hooks_generation(), at_90s.hooks_generation());
+        assert_ne!(timed.hooks_generation(), before.hooks_generation());
+        let mut changed = before.clone();
+        changed.hooks.setup.push("b".into());
+        let drift = receipt.drift(&changed);
+        assert!(drift.hooks && !drift.env && drift.added.is_empty() && !drift.is_empty());
+        assert!(receipt.reopen(&changed));
+        assert!(receipt.phase(Phase::Hooks).required_skip);
+        for phase in [
+            Phase::Materialize,
+            Phase::Payload,
+            Phase::Services,
+            Phase::Env,
+        ] {
+            assert_eq!(receipt.phase(phase).state, PhaseState::Done, "{phase:?}");
+        }
+        assert!(
+            !receipt.reopen(&changed),
+            "calling it again changes nothing"
+        );
+    }
+
+    #[test]
+    fn a_receipt_without_the_hooks_generation_adopts_it_and_is_never_reopened_for_it() {
+        let before =
+            Config::parse("[project]\nname = \"s\"\nid = \"0b3c9d2e-1111-4222-8333-444455556666\"\n[hooks]\nsetup = [\"a\"]\n")
+                .unwrap();
+        let mut changed = before.clone();
+        changed.hooks.setup = vec!["other".into()];
+        let mut old = done_receipt(&before);
+        old.hooks_generation = None;
+        assert!(
+            old.drift(&changed).is_empty(),
+            "nothing says the hooks changed"
+        );
+        assert!(!old.reopen(&changed));
+        // The next write under the lock gives it a generation: a later change is seen.
+        assert!(old.adopt_hooks_generation(&before, &before));
+        assert!(!old.adopt_hooks_generation(&before, &before));
+        assert!(old.drift(&changed).hooks);
+        // A receipt whose hooks never completed has nothing to adopt.
+        let mut unfinished = Receipt::new(uuid::Uuid::new_v4(), "w", None);
+        unfinished.set_phase(Phase::Hooks, PhaseState::Pending, None);
+        assert!(!unfinished.adopt_hooks_generation(&before, &before));
+    }
+
+    #[test]
+    fn setup_hooks_that_never_ran_are_not_adopted_as_run_by_a_receipt_from_before_per_workspace_recipes()
+     {
+        let main =
+            Config::parse("[project]\nname = \"s\"\nid = \"0b3c9d2e-1111-4222-8333-444455556666\"\n[hooks]\nsetup = [\"install\"]\n")
+                .unwrap();
+        let mut branch = main.clone();
+        branch.hooks.setup = vec!["install".into(), "migrate".into()];
+        let legacy = |config: &Config| {
+            let mut receipt = done_receipt(config);
+            receipt.hooks_generation = None;
+            receipt.workspace_recipes = false;
+            receipt
+        };
+
+        // The hooks that ran are the default's; the branch's are others.
+        let mut old = legacy(&main);
+        assert!(!old.adopt_hooks_generation(&branch, &main), "not adopted");
+        assert_eq!(old.hooks_generation, None);
+        assert!(old.reopen_hooks_that_never_ran(&branch, &main));
+        let hooks = old.phase(Phase::Hooks);
+        assert!(hooks.required_skip && hooks.detail.unwrap().contains("have not run here"));
+        assert_eq!(
+            old.phase(Phase::Env).state,
+            PhaseState::Done,
+            "only the hooks"
+        );
+        assert!(
+            !old.reopen_hooks_that_never_ran(&branch, &main),
+            "once: calling it again changes nothing"
+        );
+        // Running them stamps the generation, and then nothing is reopened again.
+        old.set_phase(Phase::Hooks, PhaseState::Done, None);
+        old.stamp_hooks_generation(&branch);
+        assert!(!old.reopen_hooks_that_never_ran(&branch, &main));
+
+        // The same hooks as the default's: nothing reopens, and they are adopted.
+        let mut same = legacy(&main);
+        assert!(!same.reopen_hooks_that_never_ran(&main, &main));
+        assert!(same.adopt_hooks_generation(&main, &main));
+
+        // A receipt written by this devflow has no such baseline: its hooks are
+        // its own, whatever the default workspace's are.
+        let mut new = done_receipt(&branch);
+        new.hooks_generation = None;
+        assert!(!new.reopen_hooks_that_never_ran(&branch, &main));
+        assert!(new.adopt_hooks_generation(&branch, &main));
+        // `--no-hooks` and unfinished hooks are not "run" to begin with.
+        let mut skipped = legacy(&main);
+        skipped.skip_deliberate(Phase::Hooks, SKIP_NO_HOOKS.into());
+        assert!(!skipped.reopen_hooks_that_never_ran(&branch, &main));
+    }
+
+    #[test]
+    fn a_workspace_without_recipes_reopens_payload_env_and_hooks_but_not_what_was_asked_to_skip() {
+        let config = Config::default();
+        let mut receipt = done_receipt(&config);
+        assert!(receipt.reopen_without_recipes("no recipes"));
+        for phase in [Phase::Payload, Phase::Env, Phase::Hooks] {
+            let record = receipt.phase(phase);
+            assert!(record.required_skip, "{phase:?}: {record:?}");
+            assert_eq!(record.detail.as_deref(), Some("no recipes"));
+        }
+        assert_eq!(receipt.phase(Phase::Services).state, PhaseState::Done);
+        assert_eq!(receipt.status(), Status::NeedsAttention);
+        assert!(!receipt.reopen_without_recipes("no recipes"), "once");
+
+        // `--no-hooks` is kept.
+        let mut no_hooks = done_receipt(&config);
+        no_hooks.skip_deliberate(Phase::Hooks, SKIP_NO_HOOKS.into());
+        no_hooks.reopen_without_recipes("no recipes");
+        assert!(
+            no_hooks.phase(Phase::Hooks).deliberate && !no_hooks.phase(Phase::Hooks).required_skip
+        );
+    }
+
+    #[test]
+    fn the_choice_of_recipes_is_an_optional_field_a_receipt_without_it_still_reads() {
+        let receipt = Receipt::new(uuid::Uuid::new_v4(), "w", None);
+        let mut json = serde_json::to_value(&receipt).unwrap();
+        assert!(json.get("default_recipes").is_none() && json.get("hooks_generation").is_none());
+        assert_eq!(json["workspace_recipes"], true, "a new receipt knows");
+        assert!(!receipt.keeps_default_recipes());
+        let mut chosen = receipt.clone();
+        chosen.default_recipes = Some(DefaultRecipes {
+            chosen_at: Utc::now(),
+            because: "devflow.toml does not exist".into(),
+        });
+        assert!(chosen.keeps_default_recipes());
+        let back: Receipt = serde_json::from_value(serde_json::to_value(&chosen).unwrap()).unwrap();
+        assert_eq!(back.default_recipes, chosen.default_recipes);
+        assert_eq!(back.version, VERSION, "receipts stay version 2");
+        // As an earlier devflow wrote it: none of the new fields, and it keeps
+        // the default workspace's recipes where the branch has none, as before.
+        json.as_object_mut().unwrap().remove("workspace_recipes");
+        let old: Receipt = serde_json::from_value(json).unwrap();
+        assert_eq!(old.default_recipes, None);
+        assert!(!old.workspace_recipes && old.keeps_default_recipes());
     }
 
     #[test]

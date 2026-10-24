@@ -183,6 +183,22 @@ impl TableDelegate for WorkspaceTable {
                         "The main checkout. It cannot be removed.",
                     ))
                 })
+                .when(row.suspended, |r| {
+                    r.child(ui::pill(
+                        "workspace-suspended",
+                        "suspended",
+                        ui::Tone::Info,
+                        "Its containers and daemons are stopped; its data is kept. Entering it resumes it.",
+                    ))
+                })
+                .when(row.pinned, |r| {
+                    r.child(ui::pill(
+                        "workspace-pinned",
+                        "pinned",
+                        ui::Tone::Neutral,
+                        "Kept out of the idle suspension",
+                    ))
+                })
                 .into_any_element(),
             "branch" => h_flex()
                 .gap_2()

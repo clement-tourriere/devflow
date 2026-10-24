@@ -19,9 +19,9 @@ use devflow_core::config_edit::{
 };
 use devflow_core::hooks::HookPhase;
 use devflow_core::trust::{self, TrustState};
-use devflow_core::{Project, project, redact};
+use devflow_core::{Project, project, redact, worktree};
 use serde_json::{Value, json};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -46,8 +46,8 @@ impl From<PhaseArg> for HookPhase {
 
 #[derive(Subcommand)]
 pub enum HooksCommand {
-    /// List the hooks of each phase (setup, switch, teardown)
-    List,
+    /// List the hooks of each phase (setup, switch, teardown) and the file they come from
+    List(ListArgs),
     /// Add a command to a phase
     Add(AddArgs),
     /// Change a command (its text, name or timeout)
@@ -61,13 +61,20 @@ pub enum HooksCommand {
 impl HooksCommand {
     pub fn json_name(&self) -> &'static str {
         match self {
-            HooksCommand::List => "hooks list",
+            HooksCommand::List(_) => "hooks list",
             HooksCommand::Add(_) => "hooks add",
             HooksCommand::Update(_) => "hooks update",
             HooksCommand::Remove(_) => "hooks remove",
             HooksCommand::Move(_) => "hooks move",
         }
     }
+}
+
+#[derive(Args)]
+pub struct ListArgs {
+    /// The workspace whose hooks to list (default: the one you are in, else the default workspace)
+    #[arg(long, value_name = "NAME", add = super::complete::workspace())]
+    pub workspace: Option<String>,
 }
 
 #[derive(Args)]
@@ -158,7 +165,7 @@ pub struct MoveArgs {
 pub fn run(ctx: &Ctx, command: HooksCommand) -> Result<ExitCode> {
     let name = command.json_name();
     match command {
-        HooksCommand::List => list(ctx, name),
+        HooksCommand::List(args) => list(ctx, name, args),
         HooksCommand::Add(args) => add(ctx, name, args),
         HooksCommand::Update(args) => update(ctx, name, args),
         HooksCommand::Remove(args) => remove(ctx, name, args),
@@ -176,21 +183,60 @@ pub(super) fn target_of(local: bool) -> Target {
     }
 }
 
-/// Read the files of the project this command is about: the main checkout's,
-/// whichever worktree the command runs in.
-pub(super) fn read_files(ctx: &Ctx) -> Result<ConfigFiles> {
-    let root = project::main_checkout(&ctx.cwd)?;
-    ConfigFiles::read(&root)
+/// The files a command about hooks or `[env]` works on, and the workspace
+/// they are for.
+///
+/// Recipes are per workspace: the file is the one the targeted workspace takes
+/// the section from. That is its own `devflow.toml`, or the main checkout's for
+/// the main checkout and for a workspace that chose the default workspace's
+/// recipes. The targeted workspace is `--workspace NAME`, else the one the
+/// command runs in, else the main checkout.
+pub(super) struct Files {
+    pub files: ConfigFiles,
+    /// The workspace directory the recipes are for.
+    pub dir: PathBuf,
 }
 
-/// Optimistic concurrency for scripts and agents: edit only if the file is
-/// still the one that was read.
+pub(super) fn read_files(ctx: &Ctx, workspace: Option<&str>) -> Result<Files> {
+    let root = project::main_checkout(&ctx.cwd)?;
+    let dir = match workspace {
+        Some(name) => {
+            let project = Project::open(&root)?;
+            worktree::find(&project, name)?
+                .ok_or_else(|| {
+                    anyhow::anyhow!("workspace '{name}' does not exist; `devflow list` shows them")
+                })?
+                .path
+        }
+        None => project::checkout_containing(&ctx.cwd).unwrap_or_else(|| root.clone()),
+    };
+    if dir == root {
+        return Ok(Files {
+            files: ConfigFiles::read(&root)?,
+            dir,
+        });
+    }
+    let project = Project::open(&root)?;
+    Ok(Files {
+        files: ConfigFiles::read_for(&project, &dir)?,
+        dir,
+    })
+}
+
+/// What every edit command takes: optimistic concurrency for scripts and
+/// agents (edit only if the file is still the one that was read), and the
+/// workspace whose recipes are edited.
 #[derive(Args, Default)]
 pub struct Guard {
     /// Refuse unless the file still has this SHA-256 (`files.*.sha256` of `list --json`;
     /// `none` for a file that does not exist yet)
     #[arg(long, value_name = "SHA256")]
     pub if_unchanged: Option<String>,
+    /// The workspace whose recipes to edit (default: the one you are in, else the
+    /// default workspace). Its own devflow.toml is the file edited, unless it
+    /// uses the default workspace's recipes
+    #[arg(long, value_name = "NAME", add = super::complete::workspace())]
+    pub workspace: Option<String>,
 }
 
 /// Apply `edit` to the file the caller just looked at, or, with a
@@ -206,7 +252,7 @@ pub(super) fn apply(
         Some(hash) => Some(hash.to_ascii_lowercase()),
         None => files.file(target).hash.clone(),
     };
-    config_edit::apply(&files.root, target, expected.as_deref(), edit)
+    config_edit::apply_to(files, target, expected.as_deref(), edit)
 }
 
 /// What the edit means for trust: the new content needs review when what an
@@ -217,11 +263,12 @@ pub(super) struct TrustNote {
 }
 
 impl TrustNote {
-    pub fn after(root: &Path, applied: &Applied) -> Result<Self> {
+    /// What the edit means for the workspace at `dir`, whose recipes it changed.
+    pub fn after(root: &Path, dir: &Path, applied: &Applied) -> Result<Self> {
         let project = Project::open(root)?;
         Ok(Self {
             scope_changed: applied.scope_changed,
-            state: trust::state(&project)?,
+            state: trust::state_at(&project, dir)?,
         })
     }
 
@@ -283,7 +330,8 @@ fn hooks_json(view: &HooksView) -> Value {
     })
 }
 
-/// The two configuration files and their content hashes, for `--if-unchanged`.
+/// The two configuration files and their content hashes, for `--if-unchanged`,
+/// and where the recipes of the workspace they are for come from.
 pub(super) fn files_json(files: &ConfigFiles) -> Value {
     let one = |target: Target| {
         let file = files.file(target);
@@ -294,7 +342,13 @@ pub(super) fn files_json(files: &ConfigFiles) -> Value {
             "sha256": file.hash,
         })
     };
-    json!({ "project": one(Target::Project), "local": one(Target::Local) })
+    json!({
+        "project": one(Target::Project),
+        "local": one(Target::Local),
+        // The file the targeted workspace takes its hooks and `[env]` from: its
+        // own `devflow.toml`, or the main checkout's.
+        "recipes": files.source,
+    })
 }
 
 fn render_row(row: &HookRow, palette: Palette) -> String {
@@ -309,14 +363,15 @@ fn render_row(row: &HookRow, palette: Palette) -> String {
     redact::text(&line)
 }
 
-fn list(ctx: &Ctx, name: &str) -> Result<ExitCode> {
-    let files = read_files(ctx)?;
+fn list(ctx: &Ctx, name: &str, args: ListArgs) -> Result<ExitCode> {
+    let Files { files, dir } = read_files(ctx, args.workspace.as_deref())?;
     let view = files.hooks()?;
     let project = Project::open(&files.root)?;
-    let state = trust::state(&project)?;
+    let state = trust::state_at(&project, &dir)?;
     if ctx.json {
         let body = json!({
             "project": ProjectInfo::of(&project),
+            "path": dir,
             "files": files_json(&files),
             "timeout": view.timeout,
             "timeout_source": view.timeout_source,
@@ -327,6 +382,11 @@ fn list(ctx: &Ctx, name: &str) -> Result<ExitCode> {
         return Ok(ExitCode::SUCCESS);
     }
     let palette = Palette::stdout();
+    say(palette.dim(&format!(
+        "hooks of {}, from {}",
+        output::tilde(&dir),
+        files.source.describe()
+    )));
     for phase in [&view.setup, &view.switch, &view.teardown] {
         let source = match phase.source {
             Target::Local => format!(" {}", palette.dim("(devflow.local.toml)")),
@@ -395,14 +455,15 @@ fn position(text: &str) -> Result<Placement> {
 fn report(
     ctx: &Ctx,
     name: &str,
-    files: &ConfigFiles,
+    target: &Files,
     applied: &Applied,
     phase: HookPhase,
     verb: &str,
     extra: Value,
 ) -> Result<ExitCode> {
-    let trust = TrustNote::after(&files.root, applied)?;
-    let after = ConfigFiles::read(&files.root)?;
+    let files = &target.files;
+    let trust = TrustNote::after(&files.root, &target.dir, applied)?;
+    let after = files.reread()?;
     let view = after.hooks()?;
     let project = Project::open(&files.root)?;
     if ctx.json {
@@ -410,6 +471,8 @@ fn report(
             "project": ProjectInfo::of(&project),
             "file": applied.path.file_name().map(|n| n.to_string_lossy().into_owned()),
             "path": applied.path,
+            "workspace": target.dir,
+            "recipes": files.source,
             "target": applied.target,
             "phase": phase.as_str(),
             "changed": applied.changed,
@@ -423,11 +486,9 @@ fn report(
         output::emit(ctx, name, &body)?;
         return Ok(ExitCode::SUCCESS);
     }
-    let file = applied
-        .path
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_default();
+    // The file that was edited, named in full: a workspace's own file and the
+    // main checkout's are different files.
+    let file = output::tilde(&applied.path);
     if applied.changed {
         say(format!("{verb} in hooks.{} ({file}).", phase.as_str()));
     } else {
@@ -442,12 +503,13 @@ fn report(
 }
 
 fn add(ctx: &Ctx, name: &str, args: AddArgs) -> Result<ExitCode> {
-    let files = read_files(ctx)?;
+    let target_files = read_files(ctx, args.guard.workspace.as_deref())?;
+    let files = &target_files.files;
     let target = target_of(args.local);
     let phase: HookPhase = args.phase.into();
     let at = match (&args.before, &args.after) {
-        (Some(text), _) => Placement::Before(reference(&files, phase, target, text)?),
-        (None, Some(text)) => Placement::After(reference(&files, phase, target, text)?),
+        (Some(text), _) => Placement::Before(reference(files, phase, target, text)?),
+        (None, Some(text)) => Placement::After(reference(files, phase, target, text)?),
         (None, None) => Placement::End,
     };
     let entry = HookEntry {
@@ -460,11 +522,11 @@ fn add(ctx: &Ctx, name: &str, args: AddArgs) -> Result<ExitCode> {
         entry: entry.clone(),
         at,
     };
-    let applied = apply(&files, target, &edit, &args.guard)?;
+    let applied = apply(files, target, &edit, &args.guard)?;
     let extra = json!({ "hook": {
         "name": entry.name, "run": entry.run, "timeout": entry.timeout,
     }});
-    report(ctx, name, &files, &applied, phase, "Added", extra)
+    report(ctx, name, &target_files, &applied, phase, "Added", extra)
 }
 
 fn update(ctx: &Ctx, name: &str, args: UpdateArgs) -> Result<ExitCode> {
@@ -476,10 +538,11 @@ fn update(ctx: &Ctx, name: &str, args: UpdateArgs) -> Result<ExitCode> {
     {
         bail!("nothing to change: pass --run, --name, --timeout, --clear-name or --clear-timeout");
     }
-    let files = read_files(ctx)?;
+    let target_files = read_files(ctx, args.guard.workspace.as_deref())?;
+    let files = &target_files.files;
     let target = target_of(args.local);
     let phase: HookPhase = args.phase.into();
-    let entries = entries_of(&files, phase, target)?;
+    let entries = entries_of(files, phase, target)?;
     let hook = HookRef::resolve_text(&args.hook, &entries);
     let current = match &hook {
         HookRef::Index(index) => entries.get(*index),
@@ -510,40 +573,58 @@ fn update(ctx: &Ctx, name: &str, args: UpdateArgs) -> Result<ExitCode> {
         hook,
         entry: entry.clone(),
     };
-    let applied = apply(&files, target, &edit, &args.guard)?;
+    let applied = apply(files, target, &edit, &args.guard)?;
     let extra = json!({ "hook": {
         "name": entry.name, "run": entry.run, "timeout": entry.timeout,
     }});
-    report(ctx, name, &files, &applied, phase, "Updated", extra)
+    report(ctx, name, &target_files, &applied, phase, "Updated", extra)
 }
 
 fn remove(ctx: &Ctx, name: &str, args: RemoveArgs) -> Result<ExitCode> {
-    let files = read_files(ctx)?;
+    let target_files = read_files(ctx, args.guard.workspace.as_deref())?;
+    let files = &target_files.files;
     let target = target_of(args.local);
     let phase: HookPhase = args.phase.into();
-    let hook = reference(&files, phase, target, &args.hook)?;
+    let hook = reference(files, phase, target, &args.hook)?;
     let applied = apply(
-        &files,
+        files,
         target,
         &Edit::RemoveHook { phase, hook },
         &args.guard,
     )?;
-    report(ctx, name, &files, &applied, phase, "Removed", json!({}))
+    report(
+        ctx,
+        name,
+        &target_files,
+        &applied,
+        phase,
+        "Removed",
+        json!({}),
+    )
 }
 
 fn move_hook(ctx: &Ctx, name: &str, args: MoveArgs) -> Result<ExitCode> {
-    let files = read_files(ctx)?;
+    let target_files = read_files(ctx, args.guard.workspace.as_deref())?;
+    let files = &target_files.files;
     let target = target_of(args.local);
     let phase: HookPhase = args.phase.into();
-    let hook = reference(&files, phase, target, &args.hook)?;
+    let hook = reference(files, phase, target, &args.hook)?;
     let to = position(&args.position)?;
     let applied = apply(
-        &files,
+        files,
         target,
         &Edit::MoveHook { phase, hook, to },
         &args.guard,
     )?;
-    report(ctx, name, &files, &applied, phase, "Moved", json!({}))
+    report(
+        ctx,
+        name,
+        &target_files,
+        &applied,
+        phase,
+        "Moved",
+        json!({}),
+    )
 }
 
 #[cfg(test)]

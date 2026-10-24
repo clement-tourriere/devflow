@@ -31,6 +31,8 @@ mod settings;
 #[cfg(test)]
 mod setup_tests;
 mod sidebar;
+mod sqlite_dialogs;
+mod sqlite_view;
 mod titlebar;
 #[cfg(test)]
 mod tray_tests;

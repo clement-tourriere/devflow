@@ -11,6 +11,7 @@ icon_assets!(
     AppIcons,
     [
         Camera,
+        Crosshair,
         Database,
         FileCog,
         FileDiff,
@@ -25,6 +26,7 @@ icon_assets!(
         ListChecks,
         Package,
         Pencil,
+        Pin,
         Rocket,
         Ruler,
         Server,
@@ -71,6 +73,7 @@ mod tests {
     fn extra_icons_resolve_and_defaults_still_do() {
         for icon in [
             IconName::Camera,
+            IconName::Crosshair,
             IconName::Database,
             IconName::FileCog,
             IconName::FileDiff,
@@ -85,6 +88,7 @@ mod tests {
             IconName::ListChecks,
             IconName::Package,
             IconName::Pencil,
+            IconName::Pin,
             IconName::Rocket,
             IconName::Ruler,
             IconName::Server,
